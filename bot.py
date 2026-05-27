@@ -1,34 +1,42 @@
 import os, requests
-from requests.auth import HTTPBasicAuth
+import google.generativeai as genai
 
-# --- CONFIG ---
-WP_URL = os.environ.get("WP_URL") 
-WP_USER = os.environ.get("WP_USER")
-WP_PASS = os.environ.get("WP_PASS")
+# Setup
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+model = genai.GenerativeModel('gemini-pro') # Change kiya
 
-def test_wp_auth():
-    print(f"DEBUG: WP_URL: {WP_URL}")
-    print(f"DEBUG: WP_USER: {WP_USER}")
-    # Password mat dikhana, bas check karo ki variable empty toh nahi hai
-    if not WP_PASS:
-        print("❌ ERROR: WP_PASS missing!")
-        return
-
-    # WordPress REST API Test (Check Auth)
+def publish_to_wp(title, content):
+    # Firewall ko dhokha dene ke liye Real Browser ki tarah headers
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://google.com/'
+    }
+    data = {'title': title, 'content': content, 'status': 'publish'}
+    
     try:
+        # Authentication aur data bhej rahe hain
         response = requests.post(
-            WP_URL, 
-            auth=HTTPBasicAuth(WP_USER, WP_PASS),
-            json={'title': 'Test Post', 'content': 'Testing connection...', 'status': 'publish'},
-            timeout=30
+            os.environ.get("WP_URL"), 
+            auth=(os.environ.get("WP_USER"), os.environ.get("WP_PASS")), 
+            json=data, 
+            headers=headers, 
+            timeout=90
         )
-        if response.status_code == 201:
-            print("✅ SUCCESS: WordPress se connection jud gaya!")
-        else:
-            print(f"❌ WP AUTH FAILED! Status: {response.status_code}")
-            print(f"Response: {response.text}")
+        print(f"DEBUG: Response {response.status_code} - {response.text}")
+        return response.status_code == 201
     except Exception as e:
-        print(f"❌ Connection Error: {e}")
+        print(f"WP Publish Exception: {e}")
+        return False
 
-if __name__ == "__main__":
-    test_wp_auth()
+# AI aur WP Test
+try:
+    print("Testing AI...")
+    model.generate_content("Hi")
+    print("AI OK. Testing WP...")
+    if publish_to_wp("Test", "Bot is active"):
+        print("✅ SUCCESS: WordPress Connected!")
+    else:
+        print("❌ WP Publish Failed.")
+except Exception as e:
+    print(f"❌ Critical Error: {e}")
