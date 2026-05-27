@@ -98,18 +98,15 @@ def clone_and_host_page(original_url: str) -> str:
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Base tag lagana taaki images/css original site se load ho
         if soup.head:
             base_tag = soup.new_tag("base", href=original_url)
             soup.head.insert(0, base_tag)
             
-        # Javascript aur Preloaders ko hatana (Gol ghumne wala issue fix)
         for script in soup(["script", "noscript"]):
             script.extract()
             
         modified_html = str(soup)
         
-        # URL se unique hash banana (Duplicate pages bachane ke liye)
         url_hash = hashlib.md5(original_url.encode('utf-8')).hexdigest()[:10]
         filename = f"post_{url_hash}.html"
         
@@ -142,3 +139,84 @@ def parse_item(item_xml: str):
     m_enc = re.search(r'enclosure[^>]+url="([^"]+)"[^>]+type="([^"]+)"', item_xml, flags=re.I)
     if m_enc:
         enc_url, enc_type = m_enc.group(1), m_enc.group(2)
+
+    custom_link = None
+    if original_link:
+        custom_link = clone_and_host_page(original_link)
+
+    title = remove_links(remove_prefixes(strip_tags(title_raw)))
+    desc = remove_links(re.sub(r"^\[Photo\]\s*", "", strip_tags(desc_raw)).strip())
+
+    combined = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+    combined = re.sub(r"\n{3,}", "\n\n", combined).strip()
+
+    if custom_link:
+        combined = f"{combined}\n\n🔗 Read Full Post: {custom_link}"
+
+    return {"guid": guid, "text": combined, "enclosure_url": enc_url, "enclosure_type": enc_type}
+
+def parse_all_items(xml: str):
+    return [parse_item(m.group(1)) for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S)]
+
+def main():
+    channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
+    if not channels: 
+        print("Error: Destination channel set nahi hai.")
+        return
+
+    last_guid = read_last()
+    
+    # NEW CODE: Yahan RSS Feed fail hone par hum usko chup nahi rehne denge
+    print("RSS Feed fetch kar rahe hain...")
+    try:
+        response = requests.get(FEED_URL, timeout=90)
+        response.raise_for_status()
+        xml = response.text
+    except Exception as e:
+        print(f"Error: RSS Feed URL block ho gaya hai ya chal nahi raha. Details: {e}")
+        return
+
+    items = parse_all_items(xml)
+    
+    if not items:
+        print("Error: RSS Feed server se mili lekin usme koi messages (items) nahi the. Ya toh feed khali hai, ya server ne captcha/error page bheja hai.")
+        print(f"Server ne ye bheja: {xml[:300]}...") # Taaki log mein dekh sakein server ne block kyu kiya
+        return
+
+    new_items = []
+    for it in items:
+        if last_guid and it["guid"] == last_guid: break
+        new_items.append(it)
+
+    if not new_items: 
+        print("Bot properly chala: Koi naye messages nahi hain (Sab up-to-date hai).")
+        return
+        
+    new_items.reverse()
+
+    for it in new_items:
+        out = f"🔥 New Update\n\n{it['text']}\n\n━━━━━━━━━━━━━━\n{FOLLOW_LINE}".strip()
+        ctype = (it["enclosure_type"] or "").lower()
+
+        try:
+            if it["enclosure_url"] and ctype.startswith("image/"):
+                img = requests.get(it["enclosure_url"], timeout=180)
+                img.raise_for_status()
+                for ch in channels: tg_send_photo_bytes(img.content, out, ch)
+            elif it["enclosure_url"] and ctype == "application/pdf":
+                pdf = requests.get(it["enclosure_url"], timeout=300)
+                pdf.raise_for_status()
+                safe_pdf = sanitize_pdf_remove_links(pdf.content)
+                for ch in channels: tg_send_document_bytes(safe_pdf, "document.pdf", out, ch)
+            else:
+                for ch in channels: tg_send_text(out, ch)
+        except Exception as e:
+            print(f"Error sending message to Telegram: {e}")
+            
+        time.sleep(1)
+
+    write_last(new_items[-1]["guid"])
+    print(f"Posted {len(new_items)} items. Last: {new_items[-1]['guid']}")
+
+if __name__ == "__main__":
+    main()
