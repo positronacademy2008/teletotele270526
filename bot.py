@@ -1,23 +1,36 @@
 import os, requests
 import google.generativeai as genai
 
-# ... (AI Configuration wahi rakho) ...
+# Setup
+api_key = os.environ.get("GEMINI_API_KEY")
+genai.configure(api_key=api_key)
 
-def publish_to_wp(title, content):
+def check_models():
+    print("--- CHECKING AVAILABLE MODELS ---")
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                print(f"AVAILABLE: {m.name}")
+    except Exception as e:
+        print(f"❌ AI List Error: {e}")
+
+def test_wp():
+    print("--- TESTING WP CONNECTION ---")
     url = os.environ.get("WP_URL")
-    # API Password use karna zaroori hai (normal admin password nahi)
-    auth = (os.environ.get("WP_USER"), os.environ.get("WP_PASS"))
+    user = os.environ.get("WP_USER")
+    passwd = os.environ.get("WP_PASS")
     
-    # 1. JSON ki jagah data dict
-    # 2. Timeout aur Headers
-    payload = {'title': title, 'content': content, 'status': 'publish'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    }
     
     try:
-        # verify=False add kiya hai taaki SSL firewall issue solve ho sake
-        response = requests.post(url, auth=auth, data=payload, timeout=60, verify=False)
-        print(f"DEBUG: Status {response.status_code}")
-        print(f"DEBUG: Response {response.text}")
-        return response.status_code == 201
+        # GET request se check karte hain agar server allow kar raha hai
+        response = requests.get(url.replace('/posts', ''), headers=headers, timeout=30)
+        print(f"WP Root Status: {response.status_code}")
     except Exception as e:
-        print(f"WP Publish Exception: {e}")
-        return False
+        print(f"Connection Failed: {e}")
+
+if __name__ == "__main__":
+    check_models()
+    test_wp()
