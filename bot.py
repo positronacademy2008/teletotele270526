@@ -1,43 +1,53 @@
-import os, requests
+import os
+import requests
 import google.generativeai as genai
+import time
 
-# --- CONFIGURATION (GitHub Secrets se utha raha hai) ---
+# --- SETUP ---
+# 1. API Configuration
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-3.1-pro-preview')
-
-def get_latest_tg_message():
-    # Aapka Telegram Bot logic (yahan apna original code use karein)
-    # Filhal testing ke liye dummy message
-    return "Science News: Positron Academy successfully launched new AI batch!"
+# gemini-2.0-flash quota ke liye best hai
+model = genai.GenerativeModel('gemini-2.0-flash')
 
 def publish_to_wp(title, content):
     url = os.environ.get("WP_URL")
     user = os.environ.get("WP_USER")
-    password = os.environ.get("WP_PASS")
+    passwd = os.environ.get("WP_PASS")
     
+    # 2. Firewall Bypass: Browser jaisa Identity (User-Agent)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01'
     }
     data = {'title': title, 'content': content, 'status': 'publish'}
     
     try:
-        response = requests.post(url, auth=(user, password), json=data, headers=headers, timeout=120)
-        return response.status_code == 201
+        # Session use kar rahe hain taaki firewall connection ko stable maane
+        session = requests.Session()
+        response = session.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
+        
+        print(f"DEBUG: Status Code: {response.status_code}")
+        if response.status_code == 201:
+            print("✅ SUCCESS: Post Published!")
+            return True
+        else:
+            print(f"❌ WP ERROR: {response.text}")
+            return False
     except Exception as e:
-        print(f"WP Error: {e}")
+        print(f"❌ WP Exception: {e}")
         return False
 
-# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    msg = get_latest_tg_message()
-    print(f"Fetched: {msg}")
-    
-    # AI se content rewrite karwa rahe hain
-    ai_response = model.generate_content(f"Rewrite this for a Science Blog: {msg}")
-    final_content = ai_response.text
-    
-    # WordPress par publish
-    if publish_to_wp("Latest Science Update", final_content):
-        print("✅ SUCCESS: Published to WordPress!")
-    else:
-        print("❌ FAILED: Still blocked by Hosting Firewall. Contact Support!")
+    try:
+        print("⏳ Generating Content...")
+        ai_response = model.generate_content("Write a 100-word educational update about Science.")
+        final_text = ai_response.text
+        
+        print("⏳ Publishing to WordPress...")
+        if publish_to_wp("Science Daily Update", final_text):
+            print("🚀 Bot Task Finished Successfully!")
+        else:
+            print("🛑 Task Failed: Hosting Firewall is still blocking the bot.")
+            
+    except Exception as e:
+        print(f"❌ AI Quota/Error: {e}")
