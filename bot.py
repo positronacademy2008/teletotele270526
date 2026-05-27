@@ -99,14 +99,36 @@ def clone_and_host_page(original_url: str) -> str:
         soup = BeautifulSoup(response.content, 'html.parser')
         
         if soup.head:
+            # Original links ko fix karne ke liye base tag
             base_tag = soup.new_tag("base", href=original_url)
             soup.head.insert(0, base_tag)
             
-        for script in soup(["script", "noscript"]):
+            # MAGIC CSS: Loaders ko chhupane aur content ko forcefully dikhane ke liye
+            style_tag = soup.new_tag("style")
+            style_tag.string = """
+                /* Gol circle aur loading screens ko hide karo */
+                [class*="loader"], [class*="spinner"], [class*="preloader"], [id*="loader"], [id*="spinner"], .loading, .loader {
+                    display: none !important;
+                    opacity: 0 !important;
+                    visibility: hidden !important;
+                }
+                /* Main content ko hamesha visible rakho */
+                body, html, .tgme_page_wrap, #main, .content {
+                    display: block !important;
+                    opacity: 1 !important;
+                    visibility: visible !important;
+                    overflow: auto !important;
+                }
+            """
+            soup.head.append(style_tag)
+            
+        # JS scripts aur iframes hata dein taaki koi background loading na ho
+        for script in soup(["script", "noscript", "iframe"]):
             script.extract()
             
         modified_html = str(soup)
         
+        # URL se hash banana taaki duplicate pages na banein
         url_hash = hashlib.md5(original_url.encode('utf-8')).hexdigest()[:10]
         filename = f"post_{url_hash}.html"
         
@@ -166,7 +188,6 @@ def main():
 
     last_guid = read_last()
     
-    # NEW CODE: Yahan RSS Feed fail hone par hum usko chup nahi rehne denge
     print("RSS Feed fetch kar rahe hain...")
     try:
         response = requests.get(FEED_URL, timeout=90)
@@ -179,8 +200,7 @@ def main():
     items = parse_all_items(xml)
     
     if not items:
-        print("Error: RSS Feed server se mili lekin usme koi messages (items) nahi the. Ya toh feed khali hai, ya server ne captcha/error page bheja hai.")
-        print(f"Server ne ye bheja: {xml[:300]}...") # Taaki log mein dekh sakein server ne block kyu kiya
+        print("Error: RSS Feed server se mili lekin usme koi messages (items) nahi the.")
         return
 
     new_items = []
