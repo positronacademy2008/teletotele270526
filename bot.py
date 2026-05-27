@@ -1,36 +1,43 @@
 import os, requests
 import google.generativeai as genai
 
-# Setup
-api_key = os.environ.get("GEMINI_API_KEY")
-genai.configure(api_key=api_key)
+# --- CONFIGURATION (GitHub Secrets se utha raha hai) ---
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
-def check_models():
-    print("--- CHECKING AVAILABLE MODELS ---")
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                print(f"AVAILABLE: {m.name}")
-    except Exception as e:
-        print(f"❌ AI List Error: {e}")
+def get_latest_tg_message():
+    # Aapka Telegram Bot logic (yahan apna original code use karein)
+    # Filhal testing ke liye dummy message
+    return "Science News: Positron Academy successfully launched new AI batch!"
 
-def test_wp():
-    print("--- TESTING WP CONNECTION ---")
+def publish_to_wp(title, content):
     url = os.environ.get("WP_URL")
     user = os.environ.get("WP_USER")
-    passwd = os.environ.get("WP_PASS")
+    password = os.environ.get("WP_PASS")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     }
+    data = {'title': title, 'content': content, 'status': 'publish'}
     
     try:
-        # GET request se check karte hain agar server allow kar raha hai
-        response = requests.get(url.replace('/posts', ''), headers=headers, timeout=30)
-        print(f"WP Root Status: {response.status_code}")
+        response = requests.post(url, auth=(user, password), json=data, headers=headers, timeout=120)
+        return response.status_code == 201
     except Exception as e:
-        print(f"Connection Failed: {e}")
+        print(f"WP Error: {e}")
+        return False
 
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    check_models()
-    test_wp()
+    msg = get_latest_tg_message()
+    print(f"Fetched: {msg}")
+    
+    # AI se content rewrite karwa rahe hain
+    ai_response = model.generate_content(f"Rewrite this for a Science Blog: {msg}")
+    final_content = ai_response.text
+    
+    # WordPress par publish
+    if publish_to_wp("Latest Science Update", final_content):
+        print("✅ SUCCESS: Published to WordPress!")
+    else:
+        print("❌ FAILED: Still blocked by Hosting Firewall. Contact Support!")
