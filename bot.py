@@ -1,50 +1,23 @@
 import os, requests
 import google.generativeai as genai
-from requests.adapters import HTTPAdapter
 
-# Setup
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-
-# Model Try/Except Logic
-def get_model():
-    models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
-    for m in models:
-        try:
-            return genai.GenerativeModel(m)
-        except: continue
-    return None
-
-model = get_model()
+# ... (AI Configuration wahi rakho) ...
 
 def publish_to_wp(title, content):
-    session = requests.Session()
-    # Firewall ko bypass karne ke लिए Session Headers
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
-    })
+    url = os.environ.get("WP_URL")
+    # API Password use karna zaroori hai (normal admin password nahi)
+    auth = (os.environ.get("WP_USER"), os.environ.get("WP_PASS"))
+    
+    # 1. JSON ki jagah data dict
+    # 2. Timeout aur Headers
+    payload = {'title': title, 'content': content, 'status': 'publish'}
     
     try:
-        response = session.post(
-            os.environ.get("WP_URL"), 
-            auth=(os.environ.get("WP_USER"), os.environ.get("WP_PASS")), 
-            json={'title': title, 'content': content, 'status': 'publish'},
-            timeout=90
-        )
+        # verify=False add kiya hai taaki SSL firewall issue solve ho sake
+        response = requests.post(url, auth=auth, data=payload, timeout=60, verify=False)
         print(f"DEBUG: Status {response.status_code}")
+        print(f"DEBUG: Response {response.text}")
         return response.status_code == 201
     except Exception as e:
-        print(f"WP Error: {e}")
+        print(f"WP Publish Exception: {e}")
         return False
-
-# Execution
-if model:
-    try:
-        print("Testing AI...")
-        res = model.generate_content("Say OK")
-        print("AI OK. Testing WP...")
-        publish_to_wp("Bot Test", "Success")
-    except Exception as e:
-        print(f"Critical: {e}")
-else:
-    print("No valid AI model found.")
