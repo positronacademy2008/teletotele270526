@@ -1,29 +1,35 @@
-import os
-import requests
+import os, requests
+import google.generativeai as genai
 
-def test_wp_direct():
+# Setup
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Aapka model jo quota mein best chal raha hai
+model = genai.GenerativeModel('gemini-2.0-flash')
+
+def publish_to_wp(title, content):
     url = os.environ.get("WP_URL")
-    user = os.environ.get("WP_USER")
-    password = os.environ.get("WP_PASS")
-    
-    # Headers ko "Real Browser" jaisa bana rahe hain
+    auth = (os.environ.get("WP_USER"), os.environ.get("WP_PASS"))
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
     }
+    data = {'title': title, 'content': content, 'status': 'publish'}
     
-    data = {
-        'title': 'CONNECTION TEST',
-        'content': 'GitHub Actions successfully connected to WordPress!',
-        'status': 'publish'
-    }
-    
-    print(f"Connecting to: {url}")
-    try:
-        response = requests.post(url, auth=(user, password), data=data, headers=headers, timeout=60)
-        print(f"Response Code: {response.status_code}")
-        print(f"Response Text: {response.text}")
-    except Exception as e:
-        print(f"Error: {e}")
+    response = requests.post(url, auth=auth, data=data, headers=headers, timeout=90)
+    return response.status_code == 201
 
 if __name__ == "__main__":
-    test_wp_direct()
+    try:
+        # Telegram message ki jagah apna content yahan fetch karein
+        msg = "Science News: AI is transforming education at Positron Academy."
+        
+        # AI se content banwayein
+        ai_response = model.generate_content(f"Create a short blog post: {msg}")
+        
+        # WordPress par bhejein
+        if publish_to_wp("Latest Science Update", ai_response.text):
+            print("🚀 SUCCESS: Bot is fully operational!")
+        else:
+            print("❌ WP Publish Failed.")
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
