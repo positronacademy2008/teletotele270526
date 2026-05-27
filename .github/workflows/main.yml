@@ -1,20 +1,18 @@
 name: Telegram Bot Feed Fetcher
-
 on:
   schedule:
-    - cron: '*/30 * * * *' # Har 30 minute mein chalega
-  workflow_dispatch: # Manual run ke liye button dega
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
@@ -37,11 +35,10 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: python bot.py
 
-    - name: Commit state (last.txt)
+    - name: Commit state
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add last.txt
-        # Agar last.txt change hui hai tabhi commit karega
-        git diff-index --quiet HEAD || git commit -m "Update last.txt"
-        git push
+        # File exist karti hai toh add karein, nahi toh ignore
+        git add last.txt || echo "last.txt not found, skipping."
+        git diff-index --quiet HEAD || (git commit -m "Update last.txt" && git push)
