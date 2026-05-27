@@ -93,34 +93,41 @@ def clone_and_host_page(original_url: str) -> str:
     if not FTP_HOST or not FTP_USER:
         return None
     try:
-        response = requests.get(original_url, timeout=30)
-        response.raise_for_status()
+        # Check if URL is a Telegram link
+        tg_match = re.search(r't\.me/([^/]+/\d+)', original_url)
         
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        if soup.head:
-            base_tag = soup.new_tag("base", href=original_url)
-            soup.head.insert(0, base_tag)
+        if tg_match:
+            post_path = tg_match.group(1) # Extractions like ShikshaVibhag/125287
             
-        # 1. Scripts aur iframes delete karo taaki loading background mein na atke
-        for script in soup(["script", "noscript", "iframe"]):
-            script.extract()
+            # The Ultimate Fix: Creating a Custom Branded Page with Official Telegram Embed
+            modified_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Positron Academy Updates</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f8; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; }}
+        .post-wrapper {{ background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 5px 15px rgba(0,0,0,0.08); width: 100%; max-width: 600px; }}
+        .header {{ text-align: center; margin-bottom: 20px; border-bottom: 2px solid #f0f2f5; padding-bottom: 15px; }}
+        .header h2 {{ margin: 0; color: #1a73e8; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }}
+        .header p {{ margin: 5px 0 0 0; color: #666; font-size: 14px; }}
+    </style>
+</head>
+<body>
+    <div class="post-wrapper">
+        <div class="header">
+            <h2>Positron Academy</h2>
+            <p>Latest Educational Update</p>
+        </div>
+        <script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-post="{post_path}" data-width="100%"></script>
+    </div>
+</body>
+</html>"""
+        else:
+            # Fallback for normal websites
+            modified_html = f"""<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0; url={original_url}"></head><body></body></html>"""
             
-        # 2. NEW MAGIC: Gol Circle (Loader) wale elements ko physically dhoondh kar DELETE karo
-        for tag in soup.find_all(True, {'class': re.compile(r'(loader|spinner|loading|preloader)', re.I)}):
-            tag.extract()
-        for tag in soup.find_all(True, {'id': re.compile(r'(loader|spinner|loading|preloader)', re.I)}):
-            tag.extract()
-            
-        # 3. Main Body aur Content ko forcefully visible (show) karo
-        if soup.body:
-            soup.body['style'] = "display: block !important; opacity: 1 !important; visibility: visible !important; overflow: auto !important; height: auto !important; background: #fff;"
-            
-        for main_div in soup.find_all(True, {'class': re.compile(r'(tgme_page|content|main|wrap)', re.I)}):
-            main_div['style'] = "display: block !important; opacity: 1 !important; visibility: visible !important;"
-            
-        modified_html = str(soup)
-        
         url_hash = hashlib.md5(original_url.encode('utf-8')).hexdigest()[:10]
         filename = f"post_{url_hash}.html"
         
