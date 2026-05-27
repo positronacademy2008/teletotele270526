@@ -22,11 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 google-generativeai
 
-      - name: Test AI Connection
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python test_ai.py
-
+     
       - name: Run Bot Script
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
