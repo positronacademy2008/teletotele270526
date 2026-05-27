@@ -99,36 +99,28 @@ def clone_and_host_page(original_url: str) -> str:
         soup = BeautifulSoup(response.content, 'html.parser')
         
         if soup.head:
-            # Original links ko fix karne ke liye base tag
             base_tag = soup.new_tag("base", href=original_url)
             soup.head.insert(0, base_tag)
             
-            # MAGIC CSS: Loaders ko chhupane aur content ko forcefully dikhane ke liye
-            style_tag = soup.new_tag("style")
-            style_tag.string = """
-                /* Gol circle aur loading screens ko hide karo */
-                [class*="loader"], [class*="spinner"], [class*="preloader"], [id*="loader"], [id*="spinner"], .loading, .loader {
-                    display: none !important;
-                    opacity: 0 !important;
-                    visibility: hidden !important;
-                }
-                /* Main content ko hamesha visible rakho */
-                body, html, .tgme_page_wrap, #main, .content {
-                    display: block !important;
-                    opacity: 1 !important;
-                    visibility: visible !important;
-                    overflow: auto !important;
-                }
-            """
-            soup.head.append(style_tag)
-            
-        # JS scripts aur iframes hata dein taaki koi background loading na ho
+        # 1. Scripts aur iframes delete karo taaki loading background mein na atke
         for script in soup(["script", "noscript", "iframe"]):
             script.extract()
             
+        # 2. NEW MAGIC: Gol Circle (Loader) wale elements ko physically dhoondh kar DELETE karo
+        for tag in soup.find_all(True, {'class': re.compile(r'(loader|spinner|loading|preloader)', re.I)}):
+            tag.extract()
+        for tag in soup.find_all(True, {'id': re.compile(r'(loader|spinner|loading|preloader)', re.I)}):
+            tag.extract()
+            
+        # 3. Main Body aur Content ko forcefully visible (show) karo
+        if soup.body:
+            soup.body['style'] = "display: block !important; opacity: 1 !important; visibility: visible !important; overflow: auto !important; height: auto !important; background: #fff;"
+            
+        for main_div in soup.find_all(True, {'class': re.compile(r'(tgme_page|content|main|wrap)', re.I)}):
+            main_div['style'] = "display: block !important; opacity: 1 !important; visibility: visible !important;"
+            
         modified_html = str(soup)
         
-        # URL se hash banana taaki duplicate pages na banein
         url_hash = hashlib.md5(original_url.encode('utf-8')).hexdigest()[:10]
         filename = f"post_{url_hash}.html"
         
