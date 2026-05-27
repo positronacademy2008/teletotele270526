@@ -34,6 +34,10 @@ jobs:
         WP_PASS: ${{ secrets.WP_PASS }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: python bot.py
+      - name: Test AI Connection
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: python test_ai.py
 
     - name: Commit state (last.txt)
       run: |
