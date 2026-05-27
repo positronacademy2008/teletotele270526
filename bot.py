@@ -97,9 +97,15 @@ def clone_and_host_page(original_url: str) -> str:
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Base tag lagana taaki images/css original site se load ho
         if soup.head:
             base_tag = soup.new_tag("base", href=original_url)
             soup.head.insert(0, base_tag)
+            
+        # NAYA CODE: Javascript aur Preloaders ko hatana (Gol ghumne wala issue fix)
+        for script in soup(["script", "noscript"]):
+            script.extract()
             
         modified_html = str(soup)
         filename = f"post_{uuid.uuid4().hex[:8]}.html"
@@ -109,7 +115,7 @@ def clone_and_host_page(original_url: str) -> str:
             try:
                 ftp.cwd(FTP_DIR)
             except ftplib.error_perm:
-                pass # Try uploading in current directory if FTP_DIR fails
+                pass 
                 
             bio = io.BytesIO(modified_html.encode('utf-8'))
             ftp.storbinary(f"STOR {filename}", bio)
