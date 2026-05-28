@@ -20,6 +20,7 @@ client = OpenAI(
 )
 
 URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
+TRUNC_END_RE = re.compile(r"""(?ix)(\s*\[\s*\.\.\.\s*\]\s*$)|(\s*\[\s*…\s*\]\s*$)|(\s*…\s*$)|(\s*\.\.\.\s*$)""")
 
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
@@ -47,6 +48,13 @@ def read_last():
 def write_last(val: str):
     open(LAST_FILE, "w", encoding="utf-8").write(val)
 
+def strip_tags(s: str) -> str:
+    s = html.unescape(s)
+    s = re.sub(r"<br\s*/?>", "\n", s)
+    s = re.sub(r"<.*?>", "", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
 def remove_links(s: str) -> str:
     s = URL_RE.sub("", s)
     s = re.sub(r"\(\s*\)", "", s)
@@ -54,7 +62,10 @@ def remove_links(s: str) -> str:
     s = re.sub(r"[ \t]{2,}", " ", s)
     return s.strip()
 
-# --- USERNAME REPLACER ---
+def remove_prefixes(s: str) -> str:
+    return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
+
+# --- REQUIREMENT 4: USERNAME REPLACER ---
 def fix_usernames(match):
     uname = match.group(0)
     if uname.lower() == "@shikshavibhag":
@@ -90,56 +101,42 @@ def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
         print(f"❌ Pikepdf error: {e}")
         return pdf_bytes
 
-# --- REAL BOT API ADVANCED PDF GRABBER ---
-def download_asli_pdf_from_telegram():
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-        resp = requests.get(url, timeout=30).json()
-        if resp.get("ok") and len(resp["result"]) > 0:
-            for update in reversed(resp["result"]):
-                node = update.get("message") or update.get("channel_post")
-                if node and "document" in node:
-                    doc = node["document"]
-                    if doc.get("mime_type") == "application/pdf" or doc.get("file_name", "").lower().endswith(".pdf"):
-                        path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={doc['file_id']}"
-                        path_resp = requests.get(path_url).json()
-                        if path_resp.get("ok"):
-                            dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path_resp['result']['file_path']}"
-                            return requests.get(dl_url, timeout=120).content
-    except Exception: pass
-    return None
+# --- 🔥 RSS FEED PARSER (Restored your Original Gold Standard) ---
+def parse_item(item_xml: str):
+    def pick(tag):
+        m = re.search(rf"<{tag}>(.*?)</{tag}>", item_xml, flags=re.S)
+        return (m.group(1).strip() if m else "")
 
-# --- TELEGRAM CHANNEL HTML SCRAPER ---
-def fetch_telegram_channel_messages():
-    username = FEED_URL.strip().replace("https://t.me/s/", "").replace("@", "")
-    scrape_url = f"https://t.me/s/{username}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    resp = requests.get(scrape_url, headers=headers, timeout=60)
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    title_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("title"))
+    desc_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("description"))
+    link = pick("link").strip()
+    guid = (pick("guid").strip() or link)
+
+    enc_url, enc_type = None, None
+    m_enc = re.search(r'enclosure[^>]+url="([^"]+)"[^>]+type="([^"]+)"', item_xml, flags=re.I)
+    if m_enc:
+        enc_url = m_enc.group(1)
+        enc_type = m_enc.group(2)
+
+    title = remove_prefixes(strip_tags(title_raw))
+    desc = strip_tags(desc_raw)
+    desc = re.sub(r"^\[Photo\]\s*", "", desc).strip()
     
+    combined = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+    combined = re.sub(r"\n{3,}", "\n\n", combined).strip()
+
+    return {
+        "guid": guid,
+        "title": title[:80] if title else "Educational Update",
+        "text": combined,
+        "enclosure_url": enc_url,
+        "enclosure_type": enc_type
+    }
+
+def parse_all_items(xml: str):
     items = []
-    # HTML parses from Top (Oldest) to Bottom (Newest)
-    for block in soup.find_all('div', class_='tgme_widget_message'):
-        guid = block.get('data-post')
-        text_block = block.find('div', class_='tgme_widget_message_text')
-        if not guid or not text_block: continue
-        
-        raw_text = text_block.get_text(separator='\n').strip()
-        lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
-        title = lines[0] if lines else "Update"
-        
-        img_url = None
-        photo_wrap = block.find('a', class_='tgme_widget_message_photo_wrap')
-        if photo_wrap and 'style' in photo_wrap.attrs:
-            m = re.search(r"url\(['\"]?(.*?)['\"]?\)", photo_wrap['style'])
-            if m: img_url = m.group(1)
-                
-        doc_url = None
-        doc_anchor = block.find('a', class_=lambda x: x and 'document' in x)
-        if doc_anchor and doc_anchor.get('href'):
-            doc_url = doc_anchor['href']
-                
-        items.append({"guid": guid, "title": title[:80], "text": raw_text, "enclosure_url": img_url, "doc_url": doc_url})
+    for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S):
+        items.append(parse_item(m.group(1)))
     return items
 
 # --- GROQ AI REWRITER ENGINE ---
@@ -170,60 +167,67 @@ def publish_to_wordpress(title, content):
     user = os.environ.get("WP_USER")
     passwd = os.environ.get("WP_PASS")
 
-    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
     
-    # 🔥 SUPER SHORT URL SLUG
-    clean_slug = f"post-{int(time.time() * 1000)}"
+    # 🔥 REQUIREMENT 2: SUPER SHORT URL SLUG (Jaise: post-171804)
+    clean_slug = f"post-{int(time.time())}"
     
     data = {'title': title, 'content': content, 'status': 'publish', 'slug': clean_slug}
 
     try:
-        session = requests.Session()
-        response = session.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
+        response = requests.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
         if response.status_code == 201:
             return response.json().get("link", "")
+        else:
+            print(f"❌ WP Status Code: {response.status_code}")
     except Exception as e:
         print(f"❌ WordPress POST Exception: {e}")
     return None
 
 # --- MAIN CONTROLLER ENGINE ---
 def main():
+    print("🚀 Starting Telegram Auto Post Script...")
     channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
     last_guid = read_last()
+    print(f"📖 Database Last GUID: {last_guid}")
     
-    items = fetch_telegram_channel_messages()
-    if not items: return
+    print(f"⏳ Fetching RSS Feed from: {FEED_URL}")
+    try:
+        xml = requests.get(FEED_URL, timeout=90).text
+        items = parse_all_items(xml)
+        print(f"✅ RSS Feed Fetched Successfully! Total parsed items: {len(items)}")
+    except Exception as e:
+        print(f"❌ Failed to fetch/parse RSS Feed: {e}")
+        return
 
-    print(f"🔍 Total messages fetched from channel: {len(items)}")
+    if not items:
+        print("⚠️ No valid items found in the XML feed.")
+        return
 
-    # 🔥 BATCH LOGIC FIXED: Ab logic oldest (index 0) se newest ki taraf kaam karega
+    # 🔥 BATCH PROCESSING: Sirf naye items uthao
     new_items = []
-    if not last_guid:
-        print("📝 last.txt is empty! Processing ALL available messages from Oldest to Newest.")
-        new_items = items
-    else:
-        found_idx = -1
-        for i, it in enumerate(items):
-            if it["guid"] == last_guid:
-                found_idx = i
-                break
-        
-        if found_idx != -1:
-            new_items = items[found_idx + 1 :]
-        else:
-            print("⚠️ last_guid not found (maybe too old). Processing ALL available messages.")
-            new_items = items
+    for it in items:
+        if last_guid and it["guid"] == last_guid:
+            print(f"📍 Hit previously processed GUID: {last_guid}")
+            break
+        new_items.append(it)
 
     if not new_items:
         print("✅ System is Up To Date. No new messages.")
         return
 
+    # Oldest se Newest sequence maintain karna
+    new_items.reverse()
     print(f"📥 Found {len(new_items)} pending messages to process!")
 
     for current_item in new_items:
         print(f"\n👉 Processing ID: {current_item['guid']}")
         
         raw_text = current_item["text"]
+        ctype = (current_item["enclosure_type"] or "").lower()
         
         # 🔥 REQUIREMENT 3: AD BLOCKING
         ad_keywords = ['t.me/+', 'sponsor', 'paid promo', 'aviator', 'betting', 'casino']
@@ -234,30 +238,29 @@ def main():
 
         # 🔥 REQUIREMENT 2: Key Replacement & Attachment Drops
         if "शिक्षा विभाग समाचार राजस्थान" in raw_text:
+            print("🔄 Triggering Keyword Rules: Replacing name & Dropping PDF/Images")
             raw_text = raw_text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
             current_item["enclosure_url"] = None
-            current_item["doc_url"] = None
+            ctype = ""
 
         # 🔥 REQUIREMENT 4: Username replacement @
         raw_text = re.sub(r'@[A-Za-z0-9_]+', fix_usernames, raw_text)
-        current_item["text"] = raw_text
 
         # -----------------------------
         # Webpage Scraping (For WP Text Only)
-        pdf_url = current_item.get("doc_url")
         found_links = URL_RE.findall(raw_text)
         webpage_scraped_data = ""
         
         if found_links:
             primary_link = found_links[0]
             if not ("t.me/" in primary_link or "telegram.me/" in primary_link):
+                print(f"🌐 Scraping External Link: {primary_link}")
                 try:
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    resp = requests.get(primary_link, headers=headers, timeout=25)
+                    resp = requests.get(primary_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=25)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, 'html.parser')
                         
-                        # 🔥 REQUIREMENT 5: Important links extraction except indianaukrihelp
+                        # 🔥 REQUIREMENT 5: Extract important links except indianaukrihelp
                         for a in soup.find_all('a', href=True):
                             href = a['href']
                             if "indianaukrihelp.com" not in href and href.startswith("http"):
@@ -272,21 +275,23 @@ def main():
                         
                         lines = (line.strip() for line in page_text.splitlines())
                         webpage_scraped_data = '\n'.join(line for line in lines if line)[:3500]
-                except Exception: pass
+                except Exception as e: print(f"⚠️ Scraping failed: {e}")
 
         # AI Rewrite
         ai_final_text = rewrite_with_groq(raw_text, webpage_scraped_data)
         
         wp_content = ai_final_text
-        if current_item["enclosure_url"]:
+        if current_item["enclosure_url"] and ctype.startswith("image/"):
             wp_content += f'<br><br><img src="{current_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-        new_page_link = publish_to_wordpress(current_item["title"], wp_content)
+        new_page_link = publish_to_wordpress(current_item["title"][:50], wp_content)
         
         if new_page_link:
-            # 🔥 REQUIREMENT 1: Remove `[...]` Heading from Telegram Text
+            # 🔥 REQUIREMENT 1: Remove `[...]` and repeating Headings from Telegram Text
             clean_root_message = remove_links(raw_text)
-            clean_root_message = re.sub(r'^(.*?(?:\[\.\.\.\]|\.\.\.|…))\s*\n+', '', clean_root_message).strip()
+            clean_root_message = TRUNC_END_RE.sub("", clean_root_message).strip()
+            # Double heading htane ke liye:
+            clean_root_message = re.sub(r'^(.*?)\s*\n+\1', r'\1', clean_root_message, flags=re.S).strip()
             
             telegram_caption = (
                 f"{clean_root_message}\n\n"
@@ -296,26 +301,31 @@ def main():
                 f"{FOLLOW_LINE_WA}"
             ).strip()
 
-            if pdf_url:
-                pdf_bytes = download_asli_pdf_from_telegram()
-                if pdf_bytes:
+            if current_item["enclosure_url"] and ctype == "application/pdf":
+                print("⏳ Downloading original PDF from RSS...")
+                try:
+                    pdf_bytes = requests.get(current_item["enclosure_url"], timeout=120).content
                     safe_pdf_bytes = sanitize_pdf_remove_links(pdf_bytes)
                     for ch in channels: tg_send_document_bytes(safe_pdf_bytes, "official_circular.pdf", telegram_caption, ch)
-                else:
+                    print("🚀 SUCCESS: PDF Document Sent!")
+                except Exception as e:
+                    print(f"❌ PDF Dispatch Failed: {e}. Falling back to text.")
                     for ch in channels: tg_send_text(telegram_caption, ch)
-            elif current_item["enclosure_url"]:
+                    
+            elif current_item["enclosure_url"] and ctype.startswith("image/"):
                 try:
                     img = requests.get(current_item["enclosure_url"], timeout=180)
                     for ch in channels: tg_send_photo_bytes(img.content, telegram_caption, ch)
+                    print("🚀 SUCCESS: Photo Sent!")
                 except:
                     for ch in channels: tg_send_text(telegram_caption, ch)
             else:
                 for ch in channels: tg_send_text(telegram_caption, ch)
+                print("🚀 SUCCESS: Text Sent!")
             
-            print(f"🚀 SUCCESS: Processed and Saved.")
             write_last(current_item["guid"])
         else:
-            print("❌ WordPress failed. Stopping batch to prevent sequence break.")
+            print("❌ WordPress failed. Stopping batch.")
             break
 
         time.sleep(3)
