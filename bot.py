@@ -139,23 +139,25 @@ def fetch_telegram_channel_messages():
 # --- GROQ AI REWRITER ENGINE ---
 def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
     print("⏳ Rewriting content via Groq AI (Active Model: llama-3.1-8b-instant)...")
-    combined_input = f"Telegram Message Info:\n{telegram_text}\n\nDeep Webpage Detailed Data:\n{webpage_text}"
+    
+    # Agar webpage se acha data mila, use primary source banayein, nahi toh telegram text backup hai
+    source_content = webpage_text if len(webpage_text) > 100 else telegram_text
     
     try:
         response = client.chat.completions.create(
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are a senior professional educational content writer for Positron Academy. Your task is to combine the short Telegram message snapshot and the deep scraped web data into one comprehensive, 100% unique, plagiarism-free blog post. Write in a brilliant, informative mix of Hindi and English (Hinglish). Do NOT echo old URLs or credit tags."
+                    "content": "You are a professional educational blog writer for Positron Academy. Rewrite the provided data into a comprehensive, detailed, 100% unique, and plagiarism-free article paragraph for a website post. Write in an engaging mix of Hindi and English (Hinglish). Do NOT include any external URLs, links or source channel credits."
                 },
-                {"role": "user", "content": f"Create an original, copyright-free detailed article from this compiled source content:\n\n{combined_input}"}
+                {"role": "user", "content": f"Create an original detailed website article based on this information:\n\n{source_content}"}
             ],
             model="llama-3.1-8b-instant", 
             temperature=0.5
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Groq AI Error: {e}. Falling back to filtered original message text.")
+        print(f"❌ Groq AI Error: {e}. Using original message text as backup.")
         return telegram_text
 
 # --- WORDPRESS PUBLISHER ---
@@ -211,43 +213,48 @@ def main():
     for it in new_items:
         print(f"📥 Processing Update ID: {it['guid']}")
         
+        # Step 1: Message ke andar se link dhoondo aur webpage ka data scrape karo
         found_links = URL_RE.findall(it["text"])
         webpage_scraped_data = ""
         
         if found_links:
             webpage_scraped_data = fetch_external_link_data(found_links[0])
             
-        clean_source_msg_text = remove_links(it["text"])
-        ai_final_text = rewrite_with_groq(clean_source_msg_text, webpage_scraped_data)
+        # Step 2: Groq AI se Website ke liye poora lamba unique content taiyar karwao
+        ai_website_content = rewrite_with_groq(it["text"], webpage_scraped_data)
         
-        wp_content = ai_final_text
-        # Typo fixed here: 'enclosure_urlスト' -> 'enclosure_url'
+        wp_content = ai_website_content
         if it["enclosure_url"]:
             wp_content += f'<br><br><img src="{it["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
+        # Step 3: WordPress par unique detailed page publish karo aur link lo
         new_page_link = publish_to_wordpress(it["title"], wp_content)
         
         if new_page_link:
+            # 🔥 Step 4: TELEGRAM FIX: Purane saare links root message se saaf karo
+            clean_root_message = remove_links(it["text"])
+            
+            # Final text format aapke naye group ke liye (Sirf original message + aapka naya web link)
             telegram_caption = (
-                f"📢 **New Educational Update**\n\n"
-                f"{ai_final_text}\n\n"
-                f"🌐 **Poori details aur official circular yahan download karein:**\n{new_page_link}"
+                f"{clean_root_message}\n\n"
+                f"🌐 **Poori details website par dekhein:**\n{new_page_link}"
             ).strip()
 
+            # Step 5: Route payload to destination channel/group
             if it["enclosure_url"]:
                 try:
                     img = requests.get(it["enclosure_url"], timeout=180)
                     for ch in channels:
                         tg_send_photo_bytes(img.content, telegram_caption, ch)
                 except Exception as e:
-                    print(f"⚠️ Photo fallback text routing triggered: {e}")
+                    print(f"⚠️ Photo download fallback triggered: {e}")
                     for ch in channels:
                         tg_send_text(telegram_caption, ch)
             else:
                 for ch in channels:
                     tg_send_text(telegram_caption, ch)
             
-            print(f"🚀 SUCCESS: Content deep analyzed, published to WP, and forwarded to group!")
+            print(f"🚀 SUCCESS: Published to WP and cleanly forwarded root message to Telegram!")
             write_last(it["guid"])
         else:
             print("❌ Workflow stopped due to WordPress error.")
