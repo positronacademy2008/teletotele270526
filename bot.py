@@ -1,24 +1,22 @@
 import os, re, html, time, io
 import requests
-from bs4 import BeautifulSoup
 import pikepdf
 from openai import OpenAI
-from urllib.parse import urljoin
 
-# --- CONFIGURATION & ENV VARIABLES ---
+# --- CONFIGURATION ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DEST_CHANNELS = os.environ["DEST_CHANNEL"]
 FEED_URL = os.environ["FEED_URL"]
+FOLLOW_LINE = os.environ.get("FOLLOW_LINE", "📢 Follow @topgkguru")
 LAST_FILE = "last.txt"
 
-FOLLOW_LINE_TG = "📢 Join Telegram: https://t.me/topgkguru"
-FOLLOW_LINE_WA = "📢 Join WhatsApp Channel: https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q"
-
+# Setup Groq AI
 client = OpenAI(
     api_key=os.environ.get("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1"
 )
 
+# Regex Patterns
 URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
 TRUNC_END_RE = re.compile(r"""(?ix)
 (\s*\[\s*\.\.\.\s*\]\s*$)|
@@ -27,7 +25,7 @@ TRUNC_END_RE = re.compile(r"""(?ix)
 (\s*\.\.\.\s*$)
 """)
 
-# --- SENDER FUNCTIONS ---
+# --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": channel, "text": text[:3900], "disable_web_page_preview": True}, timeout=60).raise_for_status()
@@ -53,8 +51,28 @@ def read_last():
 def write_last(val: str):
     open(LAST_FILE, "w", encoding="utf-8").write(val)
 
+def strip_tags(s: str) -> str:
+    s = html.unescape(s)
+    s = re.sub(r"<br\s*/?>", "\n", s)
+    s = re.sub(r"<.*?>", "", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
 def remove_links(s: str) -> str:
-    return URL_RE.sub("", s).strip()
+    s = URL_RE.sub("", s)
+    s = re.sub(r"\(\s*\)", "", s)
+    s = re.sub(r"\[\s*\]", "", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+def normalize(s: str) -> str:
+    s = TRUNC_END_RE.sub("", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def remove_prefixes(s: str) -> str:
+    return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
     print("🧹 Sanitizing PDF...")
@@ -67,13 +85,12 @@ def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
             for a in annots:
                 try:
                     obj = a.get_object()
-                    if "/A" in obj: del obj["/A"]
-                    if "/AA" in obj: del obj["/AA"]
-                    if "/Dest" in obj: del obj["/Dest"]
-                    if obj.get("/Subtype", None) == pikepdf.Name("/Link"): continue
-                    new_annots.append(a)
-                except Exception:
-                    continue
+                except Exception: continue
+                if "/A" in obj: del obj["/A"]
+                if "/AA" in obj: del obj["/AA"]
+                if "/Dest" in obj: del obj["/Dest"]
+                if obj.get("/Subtype", None) == pikepdf.Name("/Link"): continue
+                new_annots.append(a)
             if new_annots:
                 page["/Annots"] = pikepdf.Array(new_annots)
             else:
@@ -85,96 +102,154 @@ def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
         print(f"❌ Pikepdf error: {e}")
         return pdf_bytes
 
-def download_asli_pdf_from_telegram():
-    print("⏳ Fetching PDF from Telegram Bot API...")
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-        resp = requests.get(url, timeout=30).json()
-        if resp.get("ok"):
-            for update in reversed(resp["result"]):
-                node = update.get("message") or update.get("channel_post")
-                if node and "document" in node:
-                    file_id = node["document"]["file_id"]
-                    path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-                    file_path = requests.get(path_url).json()["result"]["file_path"]
-                    return requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=120).content
-    except Exception as e:
-        print(f"❌ PDF Grabber Error: {e}")
-    return None
+# --- RSS FEED PARSER ---
+def parse_item(item_xml: str):
+    def pick(tag):
+        m = re.search(rf"<{tag}>(.*?)</{tag}>", item_xml, flags=re.S)
+        return (m.group(1).strip() if m else "")
 
-def fetch_telegram_channel_messages():
-    username = FEED_URL.strip().replace("https://t.me/s/", "").replace("@", "")
-    scrape_url = f"https://t.me/s/{username}"
-    resp = requests.get(scrape_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=60)
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    title_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("title"))
+    desc_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("description"))
+    link = pick("link").strip()
+    guid = (pick("guid").strip() or link)
+
+    enc_url, enc_type = None, None
+    m_enc = re.search(r'enclosure[^>]+url="([^"]+)"[^>]+type="([^"]+)"', item_xml, flags=re.I)
+    if m_enc:
+        enc_url = m_enc.group(1)
+        enc_type = m_enc.group(2)
+
+    title = remove_prefixes(strip_tags(title_raw))
+    desc = strip_tags(desc_raw)
+    desc = re.sub(r"^\[Photo\]\s*", "", desc).strip()
+    
+    combined = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+    combined = re.sub(r"\n{3,}", "\n\n", combined).strip()
+
+    return {
+        "guid": guid,
+        "title": title[:80] if title else "Educational Update",
+        "text": combined,
+        "enclosure_url": enc_url,
+        "enclosure_type": enc_type
+    }
+
+def parse_all_items(xml: str):
     items = []
-    for block in soup.find_all('div', class_='tgme_widget_message'):
-        guid = block.get('data-post')
-        text_block = block.find('div', class_='tgme_widget_message_text')
-        if not guid or not text_block: continue
-        
-        raw_text = text_block.get_text(separator='\n').strip()
-        img_wrap = block.find('a', class_='tgme_widget_message_photo_wrap')
-        img_url = re.search(r"url\(['\"]?(.*?)['\"]?\)", img_wrap['style']) if img_wrap and 'style' in img_wrap.attrs else None
-        
-        doc_anchor = block.find('a', class_=lambda x: x and 'document' in x)
-        doc_url = doc_anchor['href'] if doc_anchor else None
-        
-        items.append({"guid": guid, "title": raw_text[:80], "text": raw_text, "enclosure_url": img_url, "doc_url": doc_url})
+    for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S):
+        items.append(parse_item(m.group(1)))
     return items
 
-def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
+# --- GROQ AI & WORDPRESS ---
+def rewrite_with_groq(text: str) -> str:
     print("⏳ Rewriting content via Groq AI...")
-    source = webpage_text if len(webpage_text) > 100 else telegram_text
     try:
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a professional educational blog writer. Rewrite content into a unique, plagiarism-free article in Hinglish. No external links."},
-                {"role": "user", "content": f"Article text:\n\n{source}"}
+                {"role": "system", "content": "You are a professional educational blog writer for Positron Academy. Rewrite the provided data into a comprehensive, detailed, 100% unique, and plagiarism-free article for a website post in Hinglish. No external URLs."},
+                {"role": "user", "content": f"Create an original detailed website article based on this information:\n\n{text}"}
             ],
             model="llama-3.1-8b-instant",
             temperature=0.5
         )
         return response.choices[0].message.content
-    except Exception:
-        return telegram_text
+    except Exception as e:
+        print(f"❌ Groq AI Error: {e}")
+        return text
 
 def publish_to_wordpress(title, content):
-    print("⏳ Posting to WP...")
+    print("⏳ Posting to WordPress...")
+    url = os.environ.get("WP_URL")
+    user = os.environ.get("WP_USER")
+    passwd = os.environ.get("WP_PASS")
+    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    data = {'title': title, 'content': content, 'status': 'publish'}
+
     try:
-        resp = requests.post(os.environ["WP_URL"], auth=(os.environ["WP_USER"], os.environ["WP_PASS"]), 
-                             data={'title': title, 'content': content, 'status': 'publish'}, timeout=90)
-        return resp.json().get("link") if resp.status_code == 201 else None
-    except: return None
+        response = requests.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
+        if response.status_code == 201:
+            return response.json().get("link", "")
+    except Exception as e:
+        print(f"❌ WordPress Error: {e}")
+    return None
 
+# --- MAIN CONTROLLER ENGINE ---
 def main():
-    channels = [c.strip() for c in DEST_CHANNELS.split(",")]
-    items = fetch_telegram_channel_messages()
-    if not items: return
-    
-    latest = items[-1]
-    if read_last() == latest["guid"]: return
+    channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
+    if not channels:
+        raise RuntimeError("DEST_CHANNEL is empty.")
 
-    clean_text = remove_links(latest["text"])
-    ai_content = rewrite_with_groq(clean_text, "") # Scraper removed for stability
+    last_guid = read_last()
+    print("⏳ Fetching Feed XML...")
+    xml = requests.get(FEED_URL, timeout=90).text
+    items = parse_all_items(xml)
     
-    wp_content = ai_content
-    if latest["enclosure_url"]: wp_content += f'<br><img src="{latest["enclosure_url"]}">'
+    if not items:
+        print("No items found")
+        return
+
+    # 🔥 Aakiri (Latest) Message uthao (RSS me items[0] sabse naya hota hai)
+    latest_item = items[0]
+
+    if last_guid and latest_item["guid"] == last_guid:
+        print(f"✅ Latest post ({latest_item['guid']}) already processed. No action needed.")
+        return
+
+    print(f"📥 Processing ONLY the absolute latest message ID: {latest_item['guid']}")
+
+    # 1. Clean links from original text
+    clean_original_text = remove_links(latest_item['text'])
     
-    link = publish_to_wordpress(latest["title"], wp_content)
-    if link:
-        cap = f"{clean_text}\n\n🌐 Website: {link}\n\n{FOLLOW_LINE_TG}\n{FOLLOW_LINE_WA}"
-        pdf = download_asli_pdf_from_telegram()
-        
-        if pdf:
-            for ch in channels: tg_send_document_bytes(sanitize_pdf_remove_links(pdf), "circular.pdf", cap, ch)
-        elif latest["enclosure_url"]:
-            img = requests.get(latest["enclosure_url"]).content
-            for ch in channels: tg_send_photo_bytes(img, cap, ch)
-        else:
-            for ch in channels: tg_send_text(cap, ch)
+    # 2. AI Website content creation
+    ai_wp_content = rewrite_with_groq(clean_original_text)
+    
+    wp_body = ai_wp_content
+    ctype = (latest_item["enclosure_type"] or "").lower()
+    
+    # Insert Image in WP Post if exists
+    if latest_item["enclosure_url"] and ctype.startswith("image/"):
+        wp_body += f'<br><br><img src="{latest_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
+
+    # 3. Publish to Website
+    new_wp_link = publish_to_wordpress(latest_item["title"], wp_body)
+
+    if new_wp_link:
+        # 4. Final Telegram Output Text (Original Clean Text + WP Link + Follow Lines)
+        telegram_caption = (
+            f"🔥 New Update\n\n"
+            f"{clean_original_text}\n\n"
+            f"🌐 **Website Link:** {new_wp_link}\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"{FOLLOW_LINE}"
+        ).strip()
+
+        # 5. Route Payload properly (Original PDF logic restored!)
+        if latest_item["enclosure_url"] and ctype == "application/pdf":
+            print("⏳ Downloading original PDF from RSS Enclosure...")
+            pdf = requests.get(latest_item["enclosure_url"], timeout=300)
+            pdf.raise_for_status()
+            safe_pdf = sanitize_pdf_remove_links(pdf.content)
             
-        write_last(latest["guid"])
+            for ch in channels:
+                tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
+            print("🚀 SUCCESS: PDF Document sent!")
+            
+        elif latest_item["enclosure_url"] and ctype.startswith("image/"):
+            img = requests.get(latest_item["enclosure_url"], timeout=180)
+            img.raise_for_status()
+            for ch in channels:
+                tg_send_photo_bytes(img.content, telegram_caption, ch)
+            print("🚀 SUCCESS: Image sent!")
+            
+        else:
+            for ch in channels:
+                tg_send_text(telegram_caption, ch)
+            print("🚀 SUCCESS: Text sent!")
+
+        # Finalize and Save
+        write_last(latest_item["guid"])
+    else:
+        print("❌ Stopping workflow. WordPress post failed.")
 
 if __name__ == "__main__":
     main()
