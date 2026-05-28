@@ -1,331 +1,609 @@
-import os, re, html, time, io
+import os
+import re
+import io
+import json
+import time
+import html
+import hashlib
+import mimetypes
 import requests
 import urllib3
-from bs4 import BeautifulSoup
-import pikepdf
-from openai import OpenAI
+import xml.etree.ElementTree as ET
 
-# 🛡️ SSL Warnings Disable
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from openai import OpenAI
+import pikepdf
+
+# =====================================================
+# CONFIG
+# =====================================================
+
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING UP - IMPROVED VERSION...")
+CACHE_FILE = "processed_cache.json"
+LOCK_FILE = "bot.lock"
 
-# --- CONFIGURATION ---
-try:
-    BOT_TOKEN = os.environ["BOT_TOKEN"]
-    DEST_CHANNELS = os.environ["DEST_CHANNEL"]
-    FEED_URL = os.environ["FEED_URL"]
-    LAST_FILE = "last.txt"
-    
-    # Apne Channels
-    FOLLOW_LINE_TG = "📢 Join Telegram: https://t.me/RAJASTHAN_TODAY"
-    FOLLOW_LINE_WA = "📢 Join WhatsApp: https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q"
-    
-    client = OpenAI(
-        api_key=os.environ.get("GROQ_API_KEY"),
-        base_url="https://api.groq.com/openai/v1"
-    )
-    print("🛠 [DEBUG] Environment Variables Loaded Successfully.")
-except Exception as e:
-    print(f"❌ [CRITICAL ERROR] Missing Environment Variables: {e}")
-    exit(1)
+FOLLOW_LINE_TG = "📢 Join Telegram: https://t.me/RAJASTHAN_TODAY"
+FOLLOW_LINE_WA = "📢 Join WhatsApp Channel: https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q"
 
-URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
+BLOCKED_DOMAINS = {
+    "indianaukrihelp.com",
+}
 
-# --- TELEGRAM FUNCTIONS ---
-def tg_send_text(text: str, channel: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": channel, "text": text[:3900], "disable_web_page_preview": True}, timeout=60).raise_for_status()
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DEST_CHANNELS = [x.strip() for x in os.environ["DEST_CHANNEL"].split(",")]
 
-def tg_send_photo_bytes(photo_bytes: bytes, caption: str, channel: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("image.jpg", photo_bytes)}
-    data = {"chat_id": channel, "caption": caption[:900]}
-    requests.post(url, data=data, files=files, timeout=180).raise_for_status()
+FEED_URL = os.environ["FEED_URL"]
 
-def tg_send_document_bytes(doc_bytes: bytes, filename: str, caption: str, channel: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-    files = {"document": (filename, doc_bytes, "application/pdf")}
-    data = {"chat_id": channel, "caption": caption[:900]}
-    requests.post(url, data=data, files=files, timeout=300).raise_for_status()
+WP_URL = os.environ["WP_URL"]
+WP_MEDIA_URL = os.environ["WP_MEDIA_URL"]
 
-# --- UTILITIES ---
-def read_last():
-    if os.path.exists(LAST_FILE):
-        return open(LAST_FILE, "r", encoding="utf-8").read().strip()
-    return ""
+WP_USER = os.environ["WP_USER"]
+WP_PASS = os.environ["WP_PASS"]
 
-def write_last(val: str):
-    open(LAST_FILE, "w", encoding="utf-8").write(val)
+WP_CATEGORY_ID = int(os.environ.get("WP_CATEGORY_ID", "1"))
 
-def strip_tags(s: str) -> str:
-    s = html.unescape(s)
-    s = re.sub(r"<br\s*/?>", "\n", s)
-    s = re.sub(r"<.*?>", "", s)
-    return re.sub(r"\n{3,}", "\n\n", s).strip()
+client = OpenAI(
+    api_key=os.environ.get("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
+)
 
-def remove_links(s: str) -> str:
-    s = URL_RE.sub("", s)
-    s = re.sub(r"\(\s*\)", "", s)
-    s = re.sub(r"\[\s*\]", "", s)
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-def remove_prefixes(s: str) -> str:
-    return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
+URL_RE = re.compile(r'https?://\S+')
 
-# Username Fixer
-def fix_usernames(match):
-    uname = match.group(0).lower()
-    if uname in ["@shikshavibhag", "@indianaukrihelp"]:
-        return "@RAJASTHAN_TODAY"
-    return "@KAPILRJ06"
+# =====================================================
+# LOCK SYSTEM
+# =====================================================
 
-# PDF Sanitizer
-def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
+def acquire_lock():
+    if os.path.exists(LOCK_FILE):
+        print("⚠️ Bot already running.")
+        raise SystemExit()
+
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(time.time()))
+
+def release_lock():
+    if os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
+
+# =====================================================
+# CACHE
+# =====================================================
+
+def load_cache():
+    if not os.path.exists(CACHE_FILE):
+        return {}
+
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+CACHE = load_cache()
+
+# =====================================================
+# HELPERS
+# =====================================================
+
+def sha(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+def clean_text(text):
+    text = html.unescape(text or "")
+    text = re.sub(r"<br\s*/?>", "\n", text)
+    text = re.sub(r"<.*?>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+def remove_links(text):
+    return URL_RE.sub("", text)
+
+def replace_usernames(text):
+    text = re.sub(r'@[A-Za-z0-9_]+', '@RAJASTHAN_TODAY', text)
+    return text
+
+def remove_competitor(text):
+    for d in BLOCKED_DOMAINS:
+        text = text.replace(d, "")
+
+    text = text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
+    return text
+
+def sanitize_html(content):
+    soup = BeautifulSoup(content, "html.parser")
+
+    for tag in soup(["script", "iframe", "form", "style"]):
+        tag.decompose()
+
+    for a in soup.find_all("a"):
+        txt = a.get_text(" ", strip=True)
+        a.replace_with(txt)
+
+    return str(soup)
+
+# =====================================================
+# TELEGRAM
+# =====================================================
+
+def tg(method, data=None, files=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+
+    for _ in range(3):
+        try:
+            r = requests.post(
+                url,
+                data=data,
+                files=files,
+                timeout=120
+            )
+
+            if r.status_code == 200:
+                return True
+
+        except Exception as e:
+            print("TG ERROR:", e)
+
+        time.sleep(2)
+
+    return False
+
+def send_text(text):
+    for ch in DEST_CHANNELS:
+        tg("sendMessage", {
+            "chat_id": ch,
+            "text": text[:4000],
+            "disable_web_page_preview": True
+        })
+
+def send_photo(img_bytes, caption):
+    for ch in DEST_CHANNELS:
+        tg(
+            "sendPhoto",
+            {"chat_id": ch, "caption": caption[:900]},
+            {"photo": ("image.jpg", img_bytes)}
+        )
+
+def send_pdf(pdf_bytes, caption):
+    for ch in DEST_CHANNELS:
+        tg(
+            "sendDocument",
+            {"chat_id": ch, "caption": caption[:900]},
+            {"document": ("file.pdf", pdf_bytes)}
+        )
+
+# =====================================================
+# PDF SANITIZE
+# =====================================================
+
+def sanitize_pdf(pdf_bytes):
     try:
         src = pikepdf.Pdf.open(io.BytesIO(pdf_bytes))
+
         for page in src.pages:
-            if "/Annots" not in page:
+            annots = page.get("/Annots", None)
+
+            if not annots:
                 continue
-            annots = page["/Annots"]
+
             new_annots = []
+
             for a in annots:
                 try:
                     obj = a.get_object()
-                    if "/A" in obj: del obj["/A"]
-                    if "/AA" in obj: del obj["/AA"]
-                    if "/Dest" in obj: del obj["/Dest"]
+
+                    if "/A" in obj:
+                        del obj["/A"]
+
                     if obj.get("/Subtype") == pikepdf.Name("/Link"):
                         continue
+
                     new_annots.append(a)
+
                 except:
-                    continue
-            page["/Annots"] = pikepdf.Array(new_annots) if new_annots else None
+                    pass
+
+            if new_annots:
+                page["/Annots"] = pikepdf.Array(new_annots)
+
         out = io.BytesIO()
         src.save(out)
+
         return out.getvalue()
+
     except:
         return pdf_bytes
 
-# --- RSS PARSER ---
-def parse_item(item_xml: str):
-    def pick(tag):
-        m = re.search(rf"<{tag}>(.*?)</{tag}>", item_xml, flags=re.S)
-        return m.group(1).strip() if m else ""
+# =====================================================
+# RSS PARSER
+# =====================================================
 
-    title_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("title"))
-    desc_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("description"))
-    guid = pick("guid") or pick("link")
-
-    enc_url = enc_type = None
-    m_enc = re.search(r'enclosure[^>]+url="([^"]+)"[^>]+type="([^"]+)"', item_xml, flags=re.I)
-    if m_enc:
-        enc_url, enc_type = m_enc.group(1), m_enc.group(2)
-
-    title = remove_prefixes(strip_tags(title_raw))
-    desc = strip_tags(desc_raw)
-
-    combined = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
-
-    return {
-        "guid": guid,
-        "title": title[:100] if title else "Educational Update",
-        "text": combined,
-        "enclosure_url": enc_url,
-        "enclosure_type": enc_type
-    }
-
-def parse_all_items(xml: str):
+def parse_feed(xml):
     items = []
-    for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S):
-        items.append(parse_item(m.group(1)))
+
+    root = ET.fromstring(xml)
+
+    for item in root.findall(".//item"):
+
+        data = {
+            "title": "",
+            "desc": "",
+            "guid": "",
+            "link": "",
+            "pub": "",
+            "enclosure_url": None,
+            "enclosure_type": None
+        }
+
+        for child in item:
+
+            tag = child.tag.split("}")[-1]
+
+            if tag == "enclosure":
+                data["enclosure_url"] = child.attrib.get("url")
+                data["enclosure_type"] = child.attrib.get("type")
+                continue
+
+            val = "".join(child.itertext()).strip()
+
+            if tag == "title":
+                data["title"] = val
+
+            elif tag == "description":
+                data["desc"] = val
+
+            elif tag == "guid":
+                data["guid"] = val
+
+            elif tag == "link":
+                data["link"] = val
+
+            elif tag == "pubDate":
+                data["pub"] = val
+
+        body = clean_text(data["desc"])
+
+        content = f"{data['title']}\n\n{body}"
+
+        data["content"] = content
+
+        items.append(data)
+
     return items
 
-# --- GROQ REWRITER ---
-def rewrite_with_groq(source_content: str) -> str:
+# =====================================================
+# SCRAPER
+# =====================================================
+
+def scrape_page(url):
+
     try:
-        response = client.chat.completions.create(
+        r = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=25,
+            verify=False
+        )
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+
+        for a in soup.find_all("a"):
+            txt = a.get_text(" ", strip=True)
+            a.replace_with(txt)
+
+        text = soup.get_text("\n")
+
+        lines = []
+
+        for line in text.splitlines():
+            line = line.strip()
+
+            if len(line) > 2:
+                lines.append(line)
+
+        text = "\n".join(lines)
+
+        text = remove_competitor(text)
+
+        return text[:5000]
+
+    except Exception as e:
+        print("SCRAPE ERROR:", e)
+        return ""
+
+# =====================================================
+# AI REWRITE
+# =====================================================
+
+def ai_rewrite(text):
+
+    try:
+
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            temperature=0.5,
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an expert SEO blog writer for Positron Academy / Rajasthan Today.
-Rewrite the given content into a detailed, engaging, unique Hinglish article.
-- Never mention 'indianaukrihelp.com', 'शिक्षा विभाग समाचार राजस्थान' or any competitor.
-- Replace any competitor Telegram/WhatsApp links with our links only.
-- Convert important URLs into proper HTML anchor tags like <a href='URL'>Click Here</a>
-- Keep content natural and informative."""
+                    "content": """
+You are expert Hindi-Hinglish SEO writer.
+
+Rules:
+- Write detailed clean HTML article.
+- Do not include competitor links.
+- Do not include external telegram/whatsapp links.
+- Use headings.
+- Use bullet points.
+- Do not use markdown.
+"""
                 },
-                {"role": "user", "content": f"Create detailed article:\n\n{source_content}"}
-            ],
-            model="llama-3.1-8b-instant",
-            temperature=0.6
+                {
+                    "role": "user",
+                    "content": text[:5000]
+                }
+            ]
         )
-        return response.choices[0].message.content
+
+        html_content = resp.choices[0].message.content
+
+        html_content = sanitize_html(html_content)
+
+        return html_content
+
     except Exception as e:
-        print(f"Groq Error: {e}")
-        return source_content
+        print("AI ERROR:", e)
+        return f"<p>{text}</p>"
 
-# --- WORDPRESS PUBLISHER ---
-def publish_to_wordpress(title, content):
-    wp_url = os.environ.get("WP_URL")
-    if not wp_url:
-        return None
+# =====================================================
+# FEATURED IMAGE
+# =====================================================
 
-    clean_slug = f"rajasthan-update-{int(time.time())}"
-    data = {
-        'title': title,
-        'content': content,
-        'status': 'publish',
-        'slug': clean_slug
-    }
+def upload_featured_image(image_url):
 
     try:
-        response = requests.post(
-            wp_url,
-            auth=(os.environ.get("WP_USER"), os.environ.get("WP_PASS")),
-            data=data,
-            headers={'User-Agent': 'Mozilla/5.0'},
-            timeout=60,
+
+        r = requests.get(
+            image_url,
+            headers=HEADERS,
+            timeout=120,
             verify=False
         )
-        if response.status_code in [200, 201]:
-            link = response.json().get("link", "")
-            print(f"✅ WP Published: {link}")
-            return link
+
+        mime = r.headers.get(
+            "content-type",
+            "image/jpeg"
+        )
+
+        ext = mimetypes.guess_extension(mime) or ".jpg"
+
+        files = {
+            "file": (f"image{ext}", r.content, mime)
+        }
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="image{ext}"'
+        }
+
+        res = requests.post(
+            WP_MEDIA_URL,
+            auth=(WP_USER, WP_PASS),
+            headers=headers,
+            files=files,
+            timeout=120,
+            verify=False
+        )
+
+        if res.status_code in [200, 201]:
+            return res.json()["id"]
+
     except Exception as e:
-        print(f"WP Publish Error: {e}")
+        print("IMG UPLOAD ERROR:", e)
+
     return None
 
-# --- MAIN ENGINE ---
-def main():
-    channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
-    last_guid = read_last()
+# =====================================================
+# WORDPRESS
+# =====================================================
+
+def publish_post(title, content, featured_media=None):
+
+    payload = {
+        "title": title,
+        "content": content,
+        "status": "publish",
+        "categories": [WP_CATEGORY_ID]
+    }
+
+    if featured_media:
+        payload["featured_media"] = featured_media
 
     try:
-        xml_resp = requests.get(FEED_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=45)
-        items = parse_all_items(xml_resp.text)
+
+        r = requests.post(
+            WP_URL,
+            auth=(WP_USER, WP_PASS),
+            json=payload,
+            timeout=120,
+            verify=False
+        )
+
+        if r.status_code in [200, 201]:
+
+            j = r.json()
+
+            return j["link"]
+
+        print(r.text)
+
     except Exception as e:
-        print(f"RSS Fetch Error: {e}")
-        return
+        print("WP ERROR:", e)
 
-    if not items:
-        return
+    return None
 
-    # Get new items
-    new_items = []
-    if not last_guid:
-        new_items = items
-    else:
-        for i, item in enumerate(items):
-            if item["guid"] == last_guid:
-                new_items = items[i+1:]
-                break
-        else:
-            new_items = [items[-1]]  # fallback
+# =====================================================
+# MAIN
+# =====================================================
 
-    if not new_items:
-        print("✅ No new updates.")
-        return
+def process():
 
-    new_items.reverse()  # oldest first
+    acquire_lock()
 
-    for item in new_items:
-        print(f"\n🔄 Processing: {item['guid']}")
+    try:
 
-        raw_text = item['text']
-        ctype = (item["enclosure_type"] or "").lower()
+        r = requests.get(
+            FEED_URL,
+            headers=HEADERS,
+            timeout=60
+        )
 
-        # Ad Blocker
-        if any(kw in raw_text.lower() for kw in ['t.me/+', 'sponsor', 'betting', 'aviator', 'casino', 'paid']):
-            write_last(item["guid"])
-            continue
+        items = parse_feed(r.text)
 
-        # Competitor Name Replace
-        raw_text = raw_text.replace("शिक्षा विभाग समाचार राजस्थान", "Rajasthan Today")
-        raw_text = re.sub(r'@[A-Za-z0-9_]+', fix_usernames, raw_text)
+        items.reverse()
 
-        # === CRITICAL FIX: Competitor Link Handling ===
-        found_links = URL_RE.findall(raw_text)
-        final_content_for_ai = raw_text
-        wp_link_to_use = None
+        for item in items:
 
-        if found_links:
-            primary_link = found_links[0]
-            
-            # Agar competitor site hai to scrape + apna post banao
-            if "indianaukrihelp.com" in primary_link:
-                print("🕵️ Competitor link detected → Deep Scraping...")
-                try:
-                    resp = requests.get(primary_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30, verify=False)
-                    soup = BeautifulSoup(resp.text, 'html.parser')
-                    
-                    for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                        element.extract()
-                    
-                    page_text = soup.get_text(separator="\n")
-                    page_text = re.sub(r'indianaukrihelp\.com|शिक्षा विभाग समाचार राजस्थान', '', page_text, flags=re.I)
-                    
-                    final_content_for_ai = page_text[:4500]
-                except Exception as e:
-                    print(f"Deep scrape failed: {e}")
+            unique_id = sha(
+                item["guid"] +
+                item["title"]
+            )
 
-        # AI Rewrite
-        wp_content = rewrite_with_groq(final_content_for_ai)
+            if unique_id in CACHE:
+                continue
 
-        # Add image if available
-        if item["enclosure_url"] and ctype.startswith("image/"):
-            wp_content += f'<br><br><img src="{item["enclosure_url"]}" style="max-width:100%;">'
+            print("PROCESSING:", item["title"])
 
-        # Publish to WordPress
-        new_wp_link = publish_to_wordpress(item["title"][:80], wp_content)
+            content = item["content"]
 
-        if new_wp_link:
-            # Clean caption for Telegram
-            clean_caption = remove_links(raw_text)
-            clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', clean_caption)
+            content = replace_usernames(content)
 
-            # Remove duplicate lines
-            lines = [l.strip() for l in clean_caption.split('\n') if l.strip()]
-            if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]):
-                lines.pop(0)
+            content = remove_competitor(content)
 
-            telegram_caption = (
-                f"{'\n\n'.join(lines)}\n\n"
-                f"🌐 Read Full Update: {new_wp_link}\n\n"
+            links = URL_RE.findall(content)
+
+            scraped = ""
+
+            if links:
+
+                first = links[0]
+
+                if not first.startswith("https://t.me/"):
+
+                    scraped = scrape_page(first)
+
+            source = scraped if scraped else content
+
+            rewritten = ai_rewrite(source)
+
+            featured_media = None
+
+            if (
+                item["enclosure_url"]
+                and
+                item["enclosure_type"]
+                and
+                item["enclosure_type"].startswith("image/")
+            ):
+                featured_media = upload_featured_image(
+                    item["enclosure_url"]
+                )
+
+            wp_link = publish_post(
+                item["title"],
+                rewritten,
+                featured_media
+            )
+
+            if not wp_link:
+                continue
+
+            final_caption = (
+                f"{remove_links(content)}\n\n"
+                f"🌐 {wp_link}\n\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"{FOLLOW_LINE_TG}\n"
                 f"{FOLLOW_LINE_WA}"
-            ).strip()
+            )
 
-            # Send to Telegram
-            if item["enclosure_url"] and ctype == "application/pdf":
-                try:
-                    pdf = requests.get(item["enclosure_url"], timeout=300, verify=False)
-                    safe_pdf = sanitize_pdf_remove_links(pdf.content)
-                    for ch in channels:
-                        tg_send_document_bytes(safe_pdf, "official_notice.pdf", telegram_caption, ch)
-                except:
-                    for ch in channels:
-                        tg_send_text(telegram_caption, ch)
-            elif item["enclosure_url"] and ctype.startswith("image/"):
-                try:
-                    img = requests.get(item["enclosure_url"], timeout=180, verify=False)
-                    for ch in channels:
-                        tg_send_photo_bytes(img.content, telegram_caption, ch)
-                except:
-                    for ch in channels:
-                        tg_send_text(telegram_caption, ch)
+            if (
+                item["enclosure_url"]
+                and
+                item["enclosure_type"]
+            ):
+
+                if item["enclosure_type"] == "application/pdf":
+
+                    try:
+
+                        pdf = requests.get(
+                            item["enclosure_url"],
+                            timeout=120,
+                            verify=False
+                        )
+
+                        safe_pdf = sanitize_pdf(
+                            pdf.content
+                        )
+
+                        send_pdf(
+                            safe_pdf,
+                            final_caption
+                        )
+
+                    except:
+                        send_text(final_caption)
+
+                elif item["enclosure_type"].startswith("image/"):
+
+                    try:
+
+                        img = requests.get(
+                            item["enclosure_url"],
+                            timeout=120,
+                            verify=False
+                        )
+
+                        send_photo(
+                            img.content,
+                            final_caption
+                        )
+
+                    except:
+                        send_text(final_caption)
+
+                else:
+                    send_text(final_caption)
+
             else:
-                for ch in channels:
-                    tg_send_text(telegram_caption, ch)
+                send_text(final_caption)
 
-            write_last(item["guid"])
-            print(f"✅ Successfully processed: {item['guid']}")
-        else:
-            print("❌ WP Publish Failed")
-            break
+            CACHE[unique_id] = {
+                "title": item["title"],
+                "time": time.time()
+            }
 
-        time.sleep(4)
+            save_cache(CACHE)
+
+            time.sleep(3)
+
+    finally:
+        release_lock()
+
+# =====================================================
+# START
+# =====================================================
 
 if __name__ == "__main__":
-    main()
+
+    process()
