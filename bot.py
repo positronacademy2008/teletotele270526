@@ -162,13 +162,20 @@ def publish_to_wordpress(title, content):
     url = os.environ.get("WP_URL")
     user = os.environ.get("WP_USER")
     passwd = os.environ.get("WP_PASS")
-    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    
+    # 🔥 FIX: Added full User-Agent to bypass Cloudflare/ModSecurity
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
     data = {'title': title, 'content': content, 'status': 'publish'}
 
     try:
         response = requests.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
         if response.status_code == 201:
             return response.json().get("link", "")
+        else:
+            print(f"❌ WP Status Code: {response.status_code}")
     except Exception as e:
         print(f"❌ WordPress Error: {e}")
     return None
@@ -188,7 +195,7 @@ def main():
         print("No items found")
         return
 
-    # 🔥 Aakiri (Latest) Message uthao (RSS me items[0] sabse naya hota hai)
+    # Aakiri (Latest) Message uthao
     latest_item = items[0]
 
     if last_guid and latest_item["guid"] == last_guid:
@@ -223,7 +230,7 @@ def main():
             f"{FOLLOW_LINE}"
         ).strip()
 
-        # 5. Route Payload properly (Original PDF logic restored!)
+        # 5. Route Payload properly (Original PDF logic)
         if latest_item["enclosure_url"] and ctype == "application/pdf":
             print("⏳ Downloading original PDF from RSS Enclosure...")
             pdf = requests.get(latest_item["enclosure_url"], timeout=300)
