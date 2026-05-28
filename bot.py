@@ -2,10 +2,8 @@ import os, re, html, time, io, requests, urllib3, pikepdf
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# 🛡️ SSL Warnings Disable
 urllib3.disable_warnings()
-
-print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION & DEEP SCRAPER MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION MODE ACTIVE...")
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -17,16 +15,7 @@ WP_PASS = os.environ.get("WP_PASS")
 LAST_FILE = "last.txt"
 client = OpenAI(api_key=os.environ.get("GROQ_API_KEY"), base_url="https://api.groq.com/openai/v1")
 
-# --- UTILITIES (RE-ADDED MISSING FUNCTIONS) ---
-def read_last():
-    if os.path.exists(LAST_FILE): return open(LAST_FILE, "r", encoding="utf-8").read().strip()
-    return ""
-
-def write_last(val):
-    open(LAST_FILE, "w", encoding="utf-8").write(val)
-    print(f"   ↳ 🛠 [DEBUG] last.txt updated with ID: {val}")
-
-# --- BRAND REPLACER ---
+# --- BRAND PROTECTION & FORMATTING ---
 def brand_replacer(text):
     text = re.sub(r'https?://t\.me/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
@@ -35,66 +24,84 @@ def brand_replacer(text):
     text = text.replace("indianaukrihelp.com", "positronacademy.in")
     return text
 
-# --- CORE FUNCTIONS ---
-def parse_all_items(xml):
-    items = []
-    for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S):
-        title = re.sub(r"<!\[CDATA\[|\]\]>", "", re.search(r"<title>(.*?)</title>", m.group(1), re.S).group(1))
-        desc = re.sub(r"<!\[CDATA\[|\]\]>", "", re.search(r"<description>(.*?)</description>", m.group(1), re.S).group(1))
-        guid = re.search(r"<guid>(.*?)</guid>", m.group(1), re.S)
-        items.append({"guid": guid.group(1) if guid else title, "title": title.strip(), "text": BeautifulSoup(desc, "html.parser").get_text()})
-    return items
+def clean_heading(text):
+    # Requirement 1: heading repetition and [...] remove
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]):
+        lines.pop(0)
+    text = '\n'.join(lines)
+    return re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', text)
 
-def rewrite_with_groq(text):
+# --- SCRAPER & PUBLISHER ---
+def deep_scrape(url):
+    print(f"🕵️ [DEBUG] Scraping competitor content: {url}")
     try:
-        resp = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Rewrite as a unique Positron Academy article in Hinglish. Replace all external links. No indianaukrihelp.com."}, {"role": "user", "content": text}],
-            model="llama-3.1-8b-instant", temperature=0.5
-        )
-        return resp.choices[0].message.content
-    except: return text
+        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30, verify=False)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        title = soup.title.string if soup.title else "Deep Scraped Post"
+        content = soup.get_text(separator="\n")
+        # Mirroring the post on your WP
+        return publish_to_wordpress(title, content)
+    except Exception as e:
+        print(f"❌ [DEBUG] Deep scrape failed: {e}")
+        return None
 
 def publish_to_wordpress(title, content):
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
-    data = {'title': brand_replacer(title), 'content': brand_replacer(content), 'status': 'publish', 'slug': f"post-{int(time.time())}"}
+    clean_content = brand_replacer(content)
+    data = {'title': brand_replacer(title), 'content': clean_content, 'status': 'publish', 'slug': f"post-{int(time.time())}"}
     try:
         r = requests.post(WP_URL, auth=(WP_USER, WP_PASS), data=data, headers=headers, timeout=60, verify=False)
         return r.json().get("link") if r.status_code == 201 else None
-    except: return None
+    except Exception as e:
+        print(f"❌ [DEBUG] WP Publish failed: {e}")
+        return None
 
-def deep_scrape(url):
-    try:
-        soup = BeautifulSoup(requests.get(url, verify=False, timeout=20).text, 'html.parser')
-        for e in soup(["script", "style", "nav", "footer", "header"]): e.extract()
-        return publish_to_wordpress(soup.title.string or "Update", brand_replacer(soup.get_text()))
-    except: return None
-
-# --- MAIN ENGINE ---
+# --- MAIN LOOP ---
 def main():
-    print("🛠 [DEBUG] Starting Main Logic...")
-    xml = requests.get(FEED_URL, timeout=45).text
-    items = parse_all_items(xml)
-    last_guid = read_last()
+    xml = requests.get(FEED_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=45).text
+    soup = BeautifulSoup(xml, 'xml')
+    items = []
+    for item in soup.find_all('item'):
+        items.append({"guid": item.guid.text if item.guid else item.title.text, "title": item.title.text, "text": item.description.text})
+    
+    last_guid = open(LAST_FILE, "r").read().strip() if os.path.exists(LAST_FILE) else ""
     new_items = [it for it in items if it["guid"] != last_guid]
     new_items.reverse()
-
+    
+    print(f"📥 [DEBUG] Found {len(new_items)} items.")
     for item in new_items:
-        print(f"👉 Processing: {item['title']}")
-        raw_text = brand_replacer(item['text'])
+        print(f"👉 [DEBUG] Processing: {item['title'][:30]}")
+        
+        # Rule 3: Ad Check
+        if any(ad in item['text'].lower() for ad in ['sponsor', 'betting', 'casino', 'aviator']):
+            print("🚫 [DEBUG] Ad blocked.")
+            open(LAST_FILE, "w").write(item['guid'])
+            continue
+
+        raw_text = clean_heading(brand_replacer(item['text']))
+        
+        # Rule 6: Mirroring logic
+        final_link = None
         links = re.findall(r'https?://[^\s<>"]+', raw_text)
-        
-        final_link = deep_scrape(links[0]) if links and "indianaukrihelp.com" in links[0] else (links[0] if links else None)
-        
+        if links:
+            if "indianaukrihelp.com" in links[0]:
+                final_link = deep_scrape(links[0])
+            else:
+                final_link = links[0]
+
+        # AI & Post
         wp_content = rewrite_with_groq(raw_text)
-        if final_link: wp_content += f"<br><a href='{final_link}'>👉 Click here for details</a>"
+        if final_link: wp_content += f"<br><br><a href='{final_link}'>👉 पूरी जानकारी यहाँ देखें</a>"
         
         wp_link = publish_to_wordpress(item['title'], wp_content)
+        
         if wp_link:
             msg = f"{brand_replacer(item['title'])}\n\n🌐 {wp_link}\n\n{FOLLOW_LINE_TG}"
             for ch in DEST_CHANNELS.split(","):
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": ch.strip(), "text": msg})
-            write_last(item['guid'])
+            open(LAST_FILE, "w").write(item['guid'])
+        
         time.sleep(5)
 
-if __name__ == "__main__":
-    main()
+# (Make sure to keep your existing rewrite_with_groq function here)
