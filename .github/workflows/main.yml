@@ -1,4 +1,4 @@
-name: RSS Feed to WordPress Bot (Groq AI)
+name: Telegram Channel to WP and New Group Bot (Groq AI)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       delete_last:
-        description: 'Force Test: Delete last.txt to process old feed items as new?'
+        description: 'Force Test: Delete last.txt to process old channel messages as new?'
         required: false
         type: boolean
         default: false
@@ -19,7 +19,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # Test Mode Option: Agar checkbox tick kiya toh last.txt delete ho jayegi
+    # Force Testing Checkbox Logic
     - name: Handle Test Mode (Delete last.txt)
       if: ${{ github.event.inputs.delete_last == 'true' }}
       run: |
@@ -36,13 +36,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests beautifulsoup4 openai pikepdf
 
-    - name: Run Positron Core Bot
+    - name: Run Complete Positron Bot
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         WP_URL: ${{ secrets.WP_URL }}
         WP_USER: ${{ secrets.WP_USER }}
         WP_PASS: ${{ secrets.WP_PASS }}
         FEED_URL: ${{ secrets.FEED_URL }}
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        DEST_CHANNEL: ${{ secrets.DEST_CHANNEL }}
       run: python bot.py
 
     - name: Save State (Commit last.txt)
