@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import pikepdf
 from openai import OpenAI
+from urllib.parse import urljoin
 
 # --- CONFIGURATION & ENV VARIABLES ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -63,35 +64,32 @@ def remove_links(s: str) -> str:
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
-# --- DEEP WEBPAGE CONTENT SCRAPER ---
-def fetch_external_link_data(url: str) -> str:
-    if "t.me/" in url or "telegram.me/" in url:
-        return ""
-        
-    print(f"🌐 Deep Scraping Original Link Content: {url}")
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        resp = requests.get(url, headers=headers, timeout=25)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            
-            for element in soup(["script", "style", "nav", "footer", "header"]):
-                element.extract()
-                
-            paragraphs = soup.find_all('p')
-            page_text = "\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
-            
-            if not page_text:
-                page_text = soup.get_text(separator="\n")
-                
-            lines = (line.strip() for line in page_text.splitlines())
-            clean_text = '\n'.join(line for line in lines if line)
-            return clean_text[:3500] 
-    except Exception as e:
-        print(f"⚠️ Link data fetch error: {e}")
-    return ""
+# --- ORIGINAL PIKEPDF LINK SANITIZER ---
+def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
+    print("🧹 Sanitizing PDF: Removing internal/external clickable links...")
+    src = pikepdf.Pdf.open(io.BytesIO(pdf_bytes))
+    for page in src.pages:
+        annots = page.get("/Annots", None)
+        if not annots: continue
+        new_annots = []
+        for a in annots:
+            try:
+                obj = a.get_object()
+            except Exception: continue
+            if "/A" in obj: del obj["/A"]
+            if "/AA" in obj: del obj["/AA"]
+            if "/Dest" in obj: del obj["/Dest"]
+            if obj.get("/Subtype", None) == pikepdf.Name("/Link"): continue
+            new_annots.append(a)
+        if new_annots:
+            page["/Annots"] = pikepdf.Array(new_annots)
+        else:
+            if "/Annots" in page: del page["/Annots"]
+    out = io.BytesIO()
+    src.save(out)
+    return out.getvalue()
 
-# --- TELEGRAM CHANNEL SCRAPER ---
+# --- TELEGRAM CHANNEL HTML SCRAPER ---
 def fetch_telegram_channel_messages():
     username = FEED_URL.strip()
     if "t.me/" in username:
@@ -139,8 +137,6 @@ def fetch_telegram_channel_messages():
 # --- GROQ AI REWRITER ENGINE ---
 def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
     print("⏳ Rewriting content via Groq AI (Active Model: llama-3.1-8b-instant)...")
-    
-    # Agar webpage se acha data mila, use primary source banayein, nahi toh telegram text backup hai
     source_content = webpage_text if len(webpage_text) > 100 else telegram_text
     
     try:
@@ -198,69 +194,116 @@ def main():
         print("⚠️ No valid data extracted from source channel.")
         return
 
-    new_items = []
-    for it in items:
-        if last_guid and it["guid"] == last_guid:
-            break
-        new_items.append(it)
-
-    if not new_items:
-        print("✅ No new posts to process.")
+    # Sirf absolute list ka aakhri item (latest) uthao
+    latest_item = items[-1]
+    
+    if last_guid and latest_item["guid"] == last_guid:
+        print(f"✅ Latest post ({latest_item['guid']}) is already up to date. No action needed.")
         return
 
-    new_items.reverse() 
+    print(f"📥 Processing ONLY the absolute latest message ID: {latest_item['guid']}")
+    
+    found_links = URL_RE.findall(latest_item["text"])
+    pdf_url = None
+    webpage_scraped_data = ""
+    
+    if found_links:
+        # 1. Check karo agar message ke andar hi direct koi PDF link hai
+        for link in found_links:
+            if link.lower().endswith(".pdf"):
+                pdf_url = link
+                break
+                
+        primary_link = found_links[0]
+        
+        # 2. Agar direct PDF nahi hai, toh webpage scrape karo aur uske andar PDF dhoondo
+        if not primary_link.lower().endswith(".pdf") and not ("t.me/" in primary_link or "telegram.me/" in primary_link):
+            print(f"🌐 Deep Scraping Original Link Content: {primary_link}")
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                resp = requests.get(primary_link, headers=headers, timeout=25)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    
+                    # Target Webpage ke andar se .pdf anchor tag nikalo
+                    if not pdf_url:
+                        for a_tag in soup.find_all('a', href=True):
+                            href = a_tag['href'].strip()
+                            if href.lower().endswith('.pdf'):
+                                pdf_url = urljoin(primary_link, href)
+                                print(f"🎯 Auto-Detected PDF inside Webpage HTML: {pdf_url}")
+                                break
+                    
+                    # Groq AI content parse
+                    for element in soup(["script", "style", "nav", "footer", "header"]):
+                        element.extract()
+                    paragraphs = soup.find_all('p')
+                    page_text = "\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+                    if not page_text:
+                        page_text = soup.get_text(separator="\n")
+                    lines = (line.strip() for line in page_text.splitlines())
+                    webpage_scraped_data = '\n'.join(line for line in lines if line)[:3500]
+            except Exception as e:
+                print(f"⚠️ Link data fetch error: {e}")
 
-    for it in new_items:
-        print(f"📥 Processing Update ID: {it['guid']}")
-        
-        # Step 1: Message ke andar se link dhoondo aur webpage ka data scrape karo
-        found_links = URL_RE.findall(it["text"])
-        webpage_scraped_data = ""
-        
-        if found_links:
-            webpage_scraped_data = fetch_external_link_data(found_links[0])
-            
-        # Step 2: Groq AI se Website ke liye poora lamba unique content taiyar karwao
-        ai_website_content = rewrite_with_groq(it["text"], webpage_scraped_data)
-        
-        wp_content = ai_website_content
-        if it["enclosure_url"]:
-            wp_content += f'<br><br><img src="{it["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
+    # Step 3: Groq AI Rewrite for WordPress Page
+    ai_final_text = rewrite_with_groq(latest_item["text"], webpage_scraped_data)
+    
+    wp_content = ai_final_text
+    if latest_item["enclosure_url"]:
+        wp_content += f'<br><br><img src="{latest_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-        # Step 3: WordPress par unique detailed page publish karo aur link lo
-        new_page_link = publish_to_wordpress(it["title"], wp_content)
+    # Step 4: WordPress Publisher
+    new_page_link = publish_to_wordpress(latest_item["title"], wp_content)
+    
+    if new_page_link:
+        # Step 5: Clean root message for Telegram destination group
+        clean_root_message = remove_links(latest_item["text"])
         
-        if new_page_link:
-            # 🔥 Step 4: TELEGRAM FIX: Purane saare links root message se saaf karo
-            clean_root_message = remove_links(it["text"])
-            
-            # Final text format aapke naye group ke liye (Sirf original message + aapka naya web link)
-            telegram_caption = (
-                f"{clean_root_message}\n\n"
-                f"🌐 **Poori details website par dekhein:**\n{new_page_link}"
-            ).strip()
+        telegram_caption = (
+            f"{clean_root_message}\n\n"
+            f"🌐 **Poori details aur official circular website par dekhein:**\n{new_page_link}"
+        ).strip()
 
-            # Step 5: Route payload to destination channel/group
-            if it["enclosure_url"]:
+        # 🔥 Step 6: ROUTING PAYLOAD (PDF vs IMAGE vs TEXT)
+        if pdf_url:
+            print(f"⏳ Downloading and Processing PDF File...")
+            try:
+                pdf_resp = requests.get(pdf_url, timeout=300)
+                pdf_resp.raise_for_status()
+                
+                # Pikepdf Sanitizer Execution
+                safe_pdf_bytes = sanitize_pdf_remove_links(pdf_resp.content)
+                
+                # Send Document with caption to all channels
+                for ch in channels:
+                    tg_send_document_bytes(safe_pdf_bytes, "official_notification.pdf", telegram_caption, ch)
+                print("🚀 SUCCESS: Cleaned PDF Document + Caption sent to destination!")
+            except Exception as e:
+                print(f"❌ PDF routing failed: {e}. Falling back to image/text.")
+                pdf_url = None # Trigger fallback below
+
+        # Fallback agar PDF nahi mila ya download fail ho gaya
+        if not pdf_url:
+            if latest_item["enclosure_url"]:
                 try:
-                    img = requests.get(it["enclosure_url"], timeout=180)
+                    img = requests.get(latest_item["enclosure_url"], timeout=180)
                     for ch in channels:
                         tg_send_photo_bytes(img.content, telegram_caption, ch)
+                    print("📢 Photo + Caption forwarded successfully!")
                 except Exception as e:
-                    print(f"⚠️ Photo download fallback triggered: {e}")
+                    print(f"⚠️ Photo fallback text routing triggered: {e}")
                     for ch in channels:
                         tg_send_text(telegram_caption, ch)
             else:
                 for ch in channels:
                     tg_send_text(telegram_caption, ch)
-            
-            print(f"🚀 SUCCESS: Published to WP and cleanly forwarded root message to Telegram!")
-            write_last(it["guid"])
-        else:
-            print("❌ Workflow stopped due to WordPress error.")
-            break
-
-        time.sleep(4)
+                print("📢 Pure Text forwarded successfully!")
+        
+        print(f"🚀 TASK COMPLETION: Saved state to database memory.")
+        write_last(latest_item["guid"])
+    else:
+        print("❌ Workflow stopped due to WordPress error.")
 
 if __name__ == "__main__":
     main()
