@@ -63,13 +63,8 @@ def remove_links(s: str) -> str:
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
-# --- 🔥 DEEP WEBPAGE CONTENT SCRAPER ---
+# --- DEEP WEBPAGE CONTENT SCRAPER ---
 def fetch_external_link_data(url: str) -> str:
-    """
-    Message ke andar jo original link hai, ye function us website par 
-    jaakar uska poora readable text utha laega.
-    """
-    # Telegram ke internal promotion links ko skip karega
     if "t.me/" in url or "telegram.me/" in url:
         return ""
         
@@ -80,21 +75,18 @@ def fetch_external_link_data(url: str) -> str:
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # फालतू chizein jaise scripts aur styles hatao
             for element in soup(["script", "style", "nav", "footer", "header"]):
                 element.extract()
                 
-            # Paragraphs (<p>) se text nikalo
             paragraphs = soup.find_all('p')
             page_text = "\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
             
             if not page_text:
                 page_text = soup.get_text(separator="\n")
                 
-            # Extra clean spaces
             lines = (line.strip() for line in page_text.splitlines())
             clean_text = '\n'.join(line for line in lines if line)
-            return clean_text[:3500] # Tokens optimize rakhne ke liye length capped
+            return clean_text[:3500] 
     except Exception as e:
         print(f"⚠️ Link data fetch error: {e}")
     return ""
@@ -144,11 +136,9 @@ def fetch_telegram_channel_messages():
         
     return items
 
-# --- NAYA GROQ AI REWRITER ENGINE ---
+# --- GROQ AI REWRITER ENGINE ---
 def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
     print("⏳ Rewriting content via Groq AI (Active Model: llama-3.1-8b-instant)...")
-    
-    # Dono content ko mix karke context build karenge
     combined_input = f"Telegram Message Info:\n{telegram_text}\n\nDeep Webpage Detailed Data:\n{webpage_text}"
     
     try:
@@ -160,7 +150,7 @@ def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
                 },
                 {"role": "user", "content": f"Create an original, copyright-free detailed article from this compiled source content:\n\n{combined_input}"}
             ],
-            model="llama-3.1-8b-instant", # Naya functional model update
+            model="llama-3.1-8b-instant", 
             temperature=0.5
         )
         return response.choices[0].message.content
@@ -216,42 +206,34 @@ def main():
         print("✅ No new posts to process.")
         return
 
-    new_items.reverse() # Restore sequence flow
+    new_items.reverse() 
 
     for it in new_items:
         print(f"📥 Processing Update ID: {it['guid']}")
         
-        # 1. Message se pehle link dhoondo aur uska internal website data fetch karo
         found_links = URL_RE.findall(it["text"])
         webpage_scraped_data = ""
         
         if found_links:
-            # Pehle link ka content download karenge
             webpage_scraped_data = fetch_external_link_data(found_links[0])
             
-        # 2. Purane links ko saaf karo content se
         clean_source_msg_text = remove_links(it["text"])
-        
-        # 3. Groq AI se dynamic merging aur unique rewrite karwao
         ai_final_text = rewrite_with_groq(clean_source_msg_text, webpage_scraped_data)
         
-        # WP body draft with image attachments
         wp_content = ai_final_text
+        # Typo fixed here: 'enclosure_urlスト' -> 'enclosure_url'
         if it["enclosure_url"]:
-            wp_content += f'<br><br><img src="{it["enclosure_urlスト"]}" alt="Update Image" style="max-width:100%;">'
+            wp_content += f'<br><br><img src="{it["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-        # 4. Post on WordPress & Get your own new website page link
         new_page_link = publish_to_wordpress(it["title"], wp_content)
         
         if new_page_link:
-            # 5. Build final output message for your New Telegram Group
             telegram_caption = (
                 f"📢 **New Educational Update**\n\n"
                 f"{ai_final_text}\n\n"
                 f"🌐 **Poori details aur official circular yahan download karein:**\n{new_page_link}"
             ).strip()
 
-            # Forward output payload to targets
             if it["enclosure_url"]:
                 try:
                     img = requests.get(it["enclosure_url"], timeout=180)
