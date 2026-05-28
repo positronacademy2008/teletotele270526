@@ -10,7 +10,7 @@ DEST_CHANNELS = os.environ["DEST_CHANNEL"] # Comma-separated: @ch1,@ch2
 FEED_URL = os.environ["FEED_URL"]          # Source Telegram Channel Username/Link
 LAST_FILE = "last.txt"
 
-# 🔥 AAPKE FOLLOW LINKS (Aap yahan se links change bhi kar sakte hain)
+# 🔥 CUSTOM BRANDING & FOLLOW LINKS
 FOLLOW_LINE_TG = "📢 Join Telegram: https://t.me/topgkguru"
 FOLLOW_LINE_WA = "📢 Join WhatsApp Channel: https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q"
 
@@ -96,18 +96,13 @@ def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
         print(f"❌ Pikepdf error during sanitization: {e}")
         return pdf_bytes
 
-# --- 🔥 REAL BOT API ADVANCED PDF GRABBER ---
+# --- REAL BOT API ADVANCED PDF GRABBER ---
 def download_asli_pdf_from_telegram():
-    """
-    Telegram getUpdates long polling se seedhe asli binary PDF download 
-    karega taaki file corrupt na ho.
-    """
     print("⏳ Fetching original PDF binary from Telegram Bot API updates...")
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
         resp = requests.get(url, timeout=30).json()
         if resp.get("ok") and len(resp["result"]) > 0:
-            # Piche se search karenge latest update ke liye
             for update in reversed(resp["result"]):
                 message_node = update.get("message") or update.get("channel_post")
                 if message_node and "document" in message_node:
@@ -115,13 +110,10 @@ def download_asli_pdf_from_telegram():
                     if doc.get("mime_type") == "application/pdf" or doc.get("file_name", "").lower().endswith(".pdf"):
                         file_id = doc["file_id"]
                         
-                        # Get File Path
                         path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
                         path_resp = requests.get(path_url).json()
                         if path_resp.get("ok"):
                             file_path = path_resp["result"]["file_path"]
-                            
-                            # Download Asli File Stream
                             download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
                             print(f"🎯 Downloading raw PDF from: {download_url}")
                             file_data = requests.get(download_url, timeout=120).content
@@ -131,7 +123,7 @@ def download_asli_pdf_from_telegram():
         print(f"❌ Real PDF Grabber Error: {e}")
     return None
 
-# --- TELEGRAM CHANNEL WEB PREVIEW SCRAPER ---
+# --- TELEGRAM CHANNEL HTML SCRAPER ---
 def fetch_telegram_channel_messages():
     username = FEED_URL.strip()
     if "t.me/" in username:
@@ -176,7 +168,7 @@ def fetch_telegram_channel_messages():
         
     return items
 
-# --- GROQ AI REWRITER ENGINE ---
+# --- GROQ AI REWRITER ENGINE (Fixed Arguments) ---
 def rewrite_with_groq(text: str) -> str:
     print("⏳ Rewriting text via Groq AI (Active Model: llama-3.1-8b-instant)...")
     try:
@@ -193,7 +185,7 @@ def rewrite_with_groq(text: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Groq AI Error: {e}. Using fallback.")
+        print(f"❌ Groq AI Error: {e}. Using original clean text as fallback.")
         return text
 
 # --- WORDPRESS PUBLISHER ---
@@ -243,11 +235,11 @@ def main():
 
     print(f"📥 Processing ONLY the absolute latest message ID: {latest_item['guid']}")
     
-    # Clean old links from text for AI processing
+    # Filter old links out for clean AI generation
     clean_source_msg_text = remove_links(latest_item["text"])
     
-    # Step 2: Groq AI Rewrite for website content
-    ai_final_text = rewrite_with_groq(clean_source_msg_text, "")
+    # Step 2: Groq AI Rewrite (Fixed: Only passing 1 argument as declared)
+    ai_final_text = rewrite_with_groq(clean_source_msg_text)
     
     wp_content = ai_final_text
     if latest_item["enclosure_url"]:
@@ -257,7 +249,7 @@ def main():
     new_page_link = publish_to_wordpress(latest_item["title"], wp_content)
     
     if new_page_link:
-        # 🔥 Step 4: MODIFIED CAPTION STRUCTURING WITH FOLLOW LINKS
+        # Step 4: MODIFIED CAPTION STRUCTURING WITH CUSTOM INTEGRATION
         telegram_caption = (
             f"{clean_source_msg_text}\n\n"
             f"🌐 **Poori details website par dekhein:**\n{new_page_link}\n\n"
@@ -266,41 +258,40 @@ def main():
             f"{FOLLOW_LINE_WA}"
         ).strip()
 
-        # 🔥 Step 5: ADVANCED REAL PDF CHECK & ROUTING
-        # Pehle check karega agar direct dynamic buffer se binary PDF milta hai
+        # Step 5: RAW BOT API PDF GRABBER & ROUTING
         pdf_content_bytes = download_asli_pdf_from_telegram()
         
         if pdf_content_bytes:
             try:
-                # Purane clickable links hatane ke liye Sanitizer chalega
+                # Clickable links filtration via Pikepdf
                 safe_pdf_bytes = sanitize_pdf_remove_links(pdf_content_bytes)
                 
-                # Send authentic PDF to all channels with our follow caption
+                # Send authentic PDF to target channel with formatting caption
                 for ch in channels:
                     tg_send_document_bytes(safe_pdf_bytes, "official_circular.pdf", telegram_caption, ch)
-                print("🚀 SUCCESS: Authentic PDF Document + Follow Links sent to your channels!")
+                print("🚀 SUCCESS: Authentic PDF Document + Follow Links layout dispatched!")
             except Exception as e:
-                print(f"❌ PDF processing crashed: {e}. Switching to media fallback.")
+                print(f"❌ PDF engine crash: {e}. Switching to media fallback.")
                 pdf_content_bytes = None
 
-        # Fallback logic agar post mein direct PDF nahi tha
+        # Fallback layer (Images/Pure Text layout)
         if not pdf_content_bytes:
             if latest_item["enclosure_url"]:
                 try:
                     img = requests.get(latest_item["enclosure_url"], timeout=180)
                     for ch in channels:
                         tg_send_photo_bytes(img.content, telegram_caption, ch)
-                    print("📢 Photo + Follow Links caption forwarded successfully!")
+                    print("📢 Photo + Follow Links layout forwarded successfully!")
                 except Exception as e:
-                    print(f"⚠️ Media fallback triggered text layout: {e}")
+                    print(f"⚠️ Media fallback text parsing triggered: {e}")
                     for ch in channels:
                         tg_send_text(telegram_caption, ch)
             else:
                 for ch in channels:
                     tg_send_text(telegram_caption, ch)
-                print("📢 Pure Text + Follow Links forwarded successfully!")
+                print("📢 Pure Text + Follow Links channel layout dispatched!")
         
-        print(f"🚀 TASK COMPLETION: Saved state.")
+        print(f"🚀 TASK COMPLETION: State committed successfully.")
         write_last(latest_item["guid"])
     else:
         print("❌ Workflow stopped due to WordPress error.")
