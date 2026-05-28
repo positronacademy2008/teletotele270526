@@ -2,7 +2,9 @@ import os, re, html, time, io, requests, urllib3, pikepdf
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
+# 🛡️ SSL Warnings Disable
 urllib3.disable_warnings()
+
 print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION & DEEP SCRAPER MODE...")
 
 # --- CONFIGURATION ---
@@ -15,7 +17,16 @@ WP_PASS = os.environ.get("WP_PASS")
 LAST_FILE = "last.txt"
 client = OpenAI(api_key=os.environ.get("GROQ_API_KEY"), base_url="https://api.groq.com/openai/v1")
 
-# --- CORE HELPERS (Fixing Data Mismatch & Branding) ---
+# --- UTILITIES (RE-ADDED MISSING FUNCTIONS) ---
+def read_last():
+    if os.path.exists(LAST_FILE): return open(LAST_FILE, "r", encoding="utf-8").read().strip()
+    return ""
+
+def write_last(val):
+    open(LAST_FILE, "w", encoding="utf-8").write(val)
+    print(f"   ↳ 🛠 [DEBUG] last.txt updated with ID: {val}")
+
+# --- BRAND REPLACER ---
 def brand_replacer(text):
     text = re.sub(r'https?://t\.me/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
@@ -24,6 +35,7 @@ def brand_replacer(text):
     text = text.replace("indianaukrihelp.com", "positronacademy.in")
     return text
 
+# --- CORE FUNCTIONS ---
 def parse_all_items(xml):
     items = []
     for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S):
@@ -36,34 +48,30 @@ def parse_all_items(xml):
 def rewrite_with_groq(text):
     try:
         resp = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Rewrite as a unique Positron Academy article in Hinglish. Replace all external links with relevant internal ones. No indianaukrihelp.com."}, {"role": "user", "content": text}],
+            messages=[{"role": "system", "content": "Rewrite as a unique Positron Academy article in Hinglish. Replace all external links. No indianaukrihelp.com."}, {"role": "user", "content": text}],
             model="llama-3.1-8b-instant", temperature=0.5
         )
         return resp.choices[0].message.content
     except: return text
 
 def publish_to_wordpress(title, content):
-    print(f"⏳ [DEBUG] Publishing: {title}")
-    data = {'title': brand_replacer(title), 'content': brand_replacer(content), 'status': 'publish'}
+    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    data = {'title': brand_replacer(title), 'content': brand_replacer(content), 'status': 'publish', 'slug': f"post-{int(time.time())}"}
     try:
-        r = requests.post(WP_URL, auth=(WP_USER, WP_PASS), data=data, timeout=60, verify=False)
+        r = requests.post(WP_URL, auth=(WP_USER, WP_PASS), data=data, headers=headers, timeout=60, verify=False)
         return r.json().get("link") if r.status_code == 201 else None
-    except Exception as e:
-        print(f"❌ [DEBUG] WP Fail: {e}")
-        return None
+    except: return None
 
-# --- NEW RULE 6: DEEP SCRAPER ENGINE ---
-def deep_scrape_and_post(url):
-    print(f"🕵️ [DEBUG] Deep scraping competitor link: {url}")
+def deep_scrape(url):
     try:
-        soup = BeautifulSoup(requests.get(url, verify=False).text, 'html.parser')
-        title = soup.title.string if soup.title else "New Update"
-        content = soup.get_text(separator="\n")
-        return publish_to_wordpress(title, content)
+        soup = BeautifulSoup(requests.get(url, verify=False, timeout=20).text, 'html.parser')
+        for e in soup(["script", "style", "nav", "footer", "header"]): e.extract()
+        return publish_to_wordpress(soup.title.string or "Update", brand_replacer(soup.get_text()))
     except: return None
 
 # --- MAIN ENGINE ---
 def main():
+    print("🛠 [DEBUG] Starting Main Logic...")
     xml = requests.get(FEED_URL, timeout=45).text
     items = parse_all_items(xml)
     last_guid = read_last()
@@ -71,27 +79,16 @@ def main():
     new_items.reverse()
 
     for item in new_items:
-        print(f"👉 [DEBUG] Processing: {item['title']}")
+        print(f"👉 Processing: {item['title']}")
         raw_text = brand_replacer(item['text'])
+        links = re.findall(r'https?://[^\s<>"]+', raw_text)
         
-        # Rule 6: Agar link indianaukrihelp ki hai, toh naya page banao
-        link_match = re.search(r'https?://[^\s<>"]+', raw_text)
-        final_link = None
-        if link_match:
-            url = link_match.group(0)
-            if "indianaukrihelp.com" in url:
-                final_link = deep_scrape_and_post(url)
-            else:
-                final_link = url
-
-        # Content Prep
+        final_link = deep_scrape(links[0]) if links and "indianaukrihelp.com" in links[0] else (links[0] if links else None)
+        
         wp_content = rewrite_with_groq(raw_text)
-        if final_link:
-            wp_content += f"<br><br><a href='{final_link}'>👉 पूरी जानकारी यहाँ देखें</a>"
+        if final_link: wp_content += f"<br><a href='{final_link}'>👉 Click here for details</a>"
         
         wp_link = publish_to_wordpress(item['title'], wp_content)
-        
-        # Telegram Dispatch
         if wp_link:
             msg = f"{brand_replacer(item['title'])}\n\n🌐 {wp_link}\n\n{FOLLOW_LINE_TG}"
             for ch in DEST_CHANNELS.split(","):
