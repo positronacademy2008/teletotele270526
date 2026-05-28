@@ -2,55 +2,55 @@ import os
 import requests
 import urllib3
 
-# Disable SSL warnings
 urllib3.disable_warnings()
 
 def test_wp_login():
-    print("🛠 [TEST] Starting WordPress API Test...")
+    print("🛠 [TEST] Starting WordPress API Test (With Anti-Blocker Headers)...")
     
-    # Secrets se details uthana
     wp_url = os.environ.get("WP_URL", "").strip()
     wp_user = os.environ.get("WP_USER", "").strip()
     wp_pass = os.environ.get("WP_PASS", "").strip()
-    
-    # Check karna ki secrets khali toh nahi hain
-    if not wp_url or not wp_user or not wp_pass:
-        print("❌ [ERROR] Missing WP_URL, WP_USER, or WP_PASS in secrets.")
-        return
 
     print(f"👉 Target URL: {wp_url}")
     print(f"👉 Target USER: {wp_user}")
-    print(f"👉 Password Length: {len(wp_pass)} characters (Password check ho raha hai...)")
+    print(f"👉 Password Length: {len(wp_pass)} characters")
     
-    # Headers taaki server isey bot samajh kar block na kare
+    # 🛡️ ULTIMATE STEALTH HEADERS (Firewall bypass karne ke liye)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+        'Referer': 'https://www.google.com/',
+        'Connection': 'keep-alive'
     }
     
-    # Ek dummy post ka data jo 'draft' rahega (Logo ko nahi dikhega)
     data = {
-        'title': 'API Test Post from GitHub Actions',
-        'content': 'Agar aapko ye dikh raha hai, toh password ekdum sahi kaam kar raha hai!',
+        'title': 'API Test Post',
+        'content': 'Password ekdum sahi hai, aur Firewall bypass ho gaya!',
         'status': 'draft'
     }
     
     print("\n⏳ Sending request to WordPress...")
     
     try:
-        response = requests.post(wp_url, auth=(wp_user, wp_pass), data=data, headers=headers, timeout=30, verify=False)
+        response = requests.post(wp_url, auth=(wp_user, wp_pass), data=data, headers=headers, timeout=30)
         
         print(f"📡 Status Code Received: {response.status_code}")
         
         if response.status_code == 201:
-            print("\n✅ [SUCCESS] Login Test Passed! WordPress me ek Draft post successfully ban gayi hai.")
-            print("Ab aap apna purana main bot code wapas use kar sakte hain!")
+            print("\n✅ [SUCCESS] Login Test Passed! Firewall bypassed and password is correct.")
+        elif response.status_code == 401:
+            print("\n❌ [FAILED] Firewall allow kar raha hai, par Username ya Password galat hai.")
+            print(f"🔍 EXACT ERROR: {response.text}")
         else:
-            print("\n❌ [FAILED] Login failed or permission denied.")
-            print(f"🔍 EXACT ERROR FROM WP: {response.text}")
+            print("\n❌ [FAILED] Request reached but failed.")
+            print(f"🔍 EXACT ERROR: {response.text}")
             
+    except requests.exceptions.Timeout:
+        print("\n❌ [CRITICAL TIMEOUT ERROR] Server ne connection raste mein hi kaat diya.")
+        print("💡 ACTION: Aapko Hostinger hPanel mein jakar 'ModSecurity' OFF karna hi padega.")
     except Exception as e:
-        print(f"\n❌ [CRITICAL ERROR] Network timeout ya connection error: {e}")
+        print(f"\n❌ [CRITICAL ERROR] Network error: {e}")
 
 if __name__ == "__main__":
     test_wp_login()
