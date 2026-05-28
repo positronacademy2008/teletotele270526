@@ -163,12 +163,20 @@ def publish_to_wordpress(title, content):
     user = os.environ.get("WP_USER")
     passwd = os.environ.get("WP_PASS")
     
-    # 🔥 FIX: Added full User-Agent to bypass Cloudflare/ModSecurity
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'application/json'
     }
-    data = {'title': title, 'content': content, 'status': 'publish'}
+    
+    # 🔥 FIX 2: Generate Short Clean URL slug (update-timestamp)
+    short_slug = f"update-{int(time.time() * 1000)}"
+
+    data = {
+        'title': title, 
+        'content': content, 
+        'status': 'publish',
+        'slug': short_slug
+    }
 
     try:
         response = requests.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
@@ -195,68 +203,81 @@ def main():
         print("No items found")
         return
 
-    # Aakiri (Latest) Message uthao
-    latest_item = items[0]
+    # 🔥 FIX 1: Pata lagao kitne naye messages hain (Batch Processing)
+    new_items = []
+    for it in items:
+        if last_guid and it["guid"] == last_guid:
+            break
+        new_items.append(it)
 
-    if last_guid and latest_item["guid"] == last_guid:
-        print(f"✅ Latest post ({latest_item['guid']}) already processed. No action needed.")
+    if not new_items:
+        print("✅ No new posts found. Everything is up to date.")
         return
 
-    print(f"📥 Processing ONLY the absolute latest message ID: {latest_item['guid']}")
+    # Purane se naye ki taraf process karna taki sequence sahi rahe
+    new_items.reverse()
+    print(f"📥 Found {len(new_items)} new messages to process!")
 
-    # 1. Clean links from original text
-    clean_original_text = remove_links(latest_item['text'])
-    
-    # 2. AI Website content creation
-    ai_wp_content = rewrite_with_groq(clean_original_text)
-    
-    wp_body = ai_wp_content
-    ctype = (latest_item["enclosure_type"] or "").lower()
-    
-    # Insert Image in WP Post if exists
-    if latest_item["enclosure_url"] and ctype.startswith("image/"):
-        wp_body += f'<br><br><img src="{latest_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
+    for latest_item in new_items:
+        print(f"\n👉 Processing message ID: {latest_item['guid']}")
 
-    # 3. Publish to Website
-    new_wp_link = publish_to_wordpress(latest_item["title"], wp_body)
+        # Clean links from original text
+        clean_original_text = remove_links(latest_item['text'])
+        
+        # AI Website content creation
+        ai_wp_content = rewrite_with_groq(clean_original_text)
+        
+        wp_body = ai_wp_content
+        ctype = (latest_item["enclosure_type"] or "").lower()
+        
+        # Insert Image in WP Post if exists
+        if latest_item["enclosure_url"] and ctype.startswith("image/"):
+            wp_body += f'<br><br><img src="{latest_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-    if new_wp_link:
-        # 4. Final Telegram Output Text (Original Clean Text + WP Link + Follow Lines)
-        telegram_caption = (
-            f"🔥 New Update\n\n"
-            f"{clean_original_text}\n\n"
-            f"🌐 **Website Link:** {new_wp_link}\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"{FOLLOW_LINE}"
-        ).strip()
+        # Publish to Website
+        new_wp_link = publish_to_wordpress(latest_item["title"], wp_body)
 
-        # 5. Route Payload properly (Original PDF logic)
-        if latest_item["enclosure_url"] and ctype == "application/pdf":
-            print("⏳ Downloading original PDF from RSS Enclosure...")
-            pdf = requests.get(latest_item["enclosure_url"], timeout=300)
-            pdf.raise_for_status()
-            safe_pdf = sanitize_pdf_remove_links(pdf.content)
-            
-            for ch in channels:
-                tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
-            print("🚀 SUCCESS: PDF Document sent!")
-            
-        elif latest_item["enclosure_url"] and ctype.startswith("image/"):
-            img = requests.get(latest_item["enclosure_url"], timeout=180)
-            img.raise_for_status()
-            for ch in channels:
-                tg_send_photo_bytes(img.content, telegram_caption, ch)
-            print("🚀 SUCCESS: Image sent!")
-            
+        if new_wp_link:
+            # 🔥 FIX 3: Caption se "**Website Link:**" hata diya gaya
+            telegram_caption = (
+                f"🔥 New Update\n\n"
+                f"{clean_original_text}\n\n"
+                f"🌐 {new_wp_link}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"{FOLLOW_LINE}"
+            ).strip()
+
+            # Route Payload properly
+            if latest_item["enclosure_url"] and ctype == "application/pdf":
+                print("⏳ Downloading original PDF from RSS Enclosure...")
+                pdf = requests.get(latest_item["enclosure_url"], timeout=300)
+                pdf.raise_for_status()
+                safe_pdf = sanitize_pdf_remove_links(pdf.content)
+                
+                for ch in channels:
+                    tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
+                print("🚀 SUCCESS: PDF Document sent!")
+                
+            elif latest_item["enclosure_url"] and ctype.startswith("image/"):
+                img = requests.get(latest_item["enclosure_url"], timeout=180)
+                img.raise_for_status()
+                for ch in channels:
+                    tg_send_photo_bytes(img.content, telegram_caption, ch)
+                print("🚀 SUCCESS: Image sent!")
+                
+            else:
+                for ch in channels:
+                    tg_send_text(telegram_caption, ch)
+                print("🚀 SUCCESS: Text sent!")
+
+            # Finalize and Save id
+            write_last(latest_item["guid"])
         else:
-            for ch in channels:
-                tg_send_text(telegram_caption, ch)
-            print("🚀 SUCCESS: Text sent!")
-
-        # Finalize and Save
-        write_last(latest_item["guid"])
-    else:
-        print("❌ Stopping workflow. WordPress post failed.")
+            print("❌ Stopping batch. WordPress post failed for this item.")
+            break
+        
+        # Thoda gap dena zaruri hai taaki spam na lage aur limit cross na ho
+        time.sleep(3)
 
 if __name__ == "__main__":
     main()
