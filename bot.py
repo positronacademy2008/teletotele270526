@@ -1,10 +1,13 @@
 import os, re, html, time, io
 import requests
+from bs4 import BeautifulSoup
 import pikepdf
 from openai import OpenAI
 
 # --- CONFIGURATION & ENV VARIABLES ---
-FEED_URL = os.environ["FEED_URL"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DEST_CHANNELS = os.environ["DEST_CHANNEL"] # Comma-separated: @ch1,@ch2
+FEED_URL = os.environ["FEED_URL"]          # Source Telegram Channel link/username
 LAST_FILE = "last.txt"
 
 # Setup Groq AI Client
@@ -13,7 +16,7 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# Regex Patterns (Aapke original code se)
+# Links hatane ke liye Regex (Website, t.me links sab saaf karega)
 URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
 TRUNC_END_RE = re.compile(r"""(?ix)
 (\s*\[\s*\.\.\.\s*\]\s*$)|
@@ -22,6 +25,28 @@ TRUNC_END_RE = re.compile(r"""(?ix)
 (\s*\.\.\.\s*$)
 """)
 
+# --- NEW TELEGRAM SENDER FUNCTIONS ---
+def tg_send_text(text: str, channel: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={
+        "chat_id": channel,
+        "text": text[:3900],
+        "disable_web_page_preview": False
+    }, timeout=60).raise_for_status()
+
+def tg_send_photo_bytes(photo_bytes: bytes, caption: str, channel: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    files = {"photo": ("image.jpg", photo_bytes)}
+    data = {"chat_id": channel, "caption": caption[:900]}
+    requests.post(url, data=data, files=files, timeout=180).raise_for_status()
+
+def tg_send_document_bytes(doc_bytes: bytes, filename: str, caption: str, channel: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    files = {"document": (filename, doc_bytes, "application/pdf")}
+    data = {"chat_id": channel, "caption": caption[:900]}
+    requests.post(url, data=data, files=files, timeout=300).raise_for_status()
+
+# --- TEXT & FILE UTILITIES ---
 def read_last():
     if os.path.exists(LAST_FILE):
         return open(LAST_FILE, "r", encoding="utf-8").read().strip()
@@ -29,13 +54,6 @@ def read_last():
 
 def write_last(val: str):
     open(LAST_FILE, "w", encoding="utf-8").write(val)
-
-def strip_tags(s: str) -> str:
-    s = html.unescape(s)
-    s = re.sub(r"<br\s*/?>", "\n", s)
-    s = re.sub(r"<.*?>", "", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
 
 def remove_links(s: str) -> str:
     s = URL_RE.sub("", s)
@@ -50,98 +68,63 @@ def normalize(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def remove_prefixes(s: str) -> str:
-    return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
-
-def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
-    src = pikepdf.Pdf.open(io.BytesIO(pdf_bytes))
-    for page in src.pages:
-        annots = page.get("/Annots", None)
-        if not annots: continue
-        new_annots = []
-        for a in annots:
-            try:
-                obj = a.get_object()
-            except Exception: continue
-            if "/A" in obj: del obj["/A"]
-            if "/AA" in obj: del obj["/AA"]
-            if "/Dest" in obj: del obj["/Dest"]
-            if obj.get("/Subtype", None) == pikepdf.Name("/Link"): continue
-            new_annots.append(a)
-        if new_annots:
-            page["/Annots"] = pikepdf.Array(new_annots)
-        else:
-            if "/Annots" in page: del page["/Annots"]
-    out = io.BytesIO()
-    src.save(out)
-    return out.getvalue()
-
-def parse_item(item_xml: str):
-    def pick(tag):
-        m = re.search(rf"<{tag}>(.*?)</{tag}>", item_xml, flags=re.S)
-        return (m.group(1).strip() if m else "")
-
-    title_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("title"))
-    desc_raw = re.sub(r"<!\[CDATA\[|\]\]>", "", pick("description"))
-    link = pick("link").strip()
-    guid = (pick("guid").strip() or link)
-
-    enc_url, enc_type = None, None
-    m_enc = re.search(r'enclosure[^>]+url="([^"]+)"[^>]+type="([^"]+)"', item_xml, flags=re.I)
-    if m_enc:
-        enc_url = m_enc.group(1)
-        enc_type = m_enc.group(2)
-
-    title = remove_prefixes(strip_tags(title_raw))
-    desc = strip_tags(desc_raw)
-    desc = re.sub(r"^\[Photo\]\s*", "", desc).strip()
-
-    title = remove_links(title)
-    desc = remove_links(desc)
-
-    title_is_truncated = bool(TRUNC_END_RE.search(title_raw)) or bool(TRUNC_END_RE.search(title))
-    t_norm = normalize(title)
-
-    first_line = ""
-    for ln in desc.splitlines():
-        if ln.strip():
-            first_line = ln.strip()
-            break
-    f_norm = normalize(first_line)
-    d_norm = normalize(desc)
-
-    if title_is_truncated:
-        combined = desc
-    else:
-        if t_norm and f_norm and (f_norm == t_norm or f_norm.startswith(t_norm) or t_norm.startswith(f_norm)):
-            combined = desc
-        elif t_norm and d_norm and (d_norm == t_norm or d_norm.startswith(t_norm)):
-            combined = desc
-        else:
-            combined = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
-
-    return {
-        "guid": guid,
-        "title": title if title else "Educational Update",
-        "text": re.sub(r"\n{3,}", "\n\n", combined).strip(),
-        "enclosure_url": enc_url,
-        "enclosure_type": enc_type
-    }
-
-def parse_all_items(xml: str):
+# --- DIRECT TELEGRAM CHANNEL HTML SCRAPER ---
+def fetch_telegram_channel_messages():
+    # Username extract karega chahe link ho ya simple text
+    username = FEED_URL.strip()
+    if "t.me/" in username:
+        username = username.split("t.me/")[-1]
+    username = username.split("/")[0].replace("@", "").strip()
+    
+    scrape_url = f"https://t.me/s/{username}"
+    print(f"⏳ Scraping Source Telegram Channel: {scrape_url}")
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    resp = requests.get(scrape_url, headers=headers, timeout=60)
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    
+    msg_blocks = soup.find_all('div', class_='tgme_widget_message')
     items = []
-    for m in re.finditer(r"<item>(.*?)</item>", xml, flags=re.S):
-        items.append(parse_item(m.group(1)))
+    
+    for block in msg_blocks:
+        guid = block.get('data-post') # Format: channel_name/123
+        if not guid: continue
+        
+        text_block = block.find('div', class_='tgme_widget_message_text')
+        if not text_block: continue
+        
+        raw_text = text_block.get_text(separator='\n').strip()
+        
+        # Pehli line ko title maan lete hain WordPress ke liye
+        lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+        title = lines[0] if lines else "New Update"
+        
+        # Image check karega agar post mein photo hai
+        img_url = None
+        photo_wrap = block.find('a', class_='tgme_widget_message_photo_wrap')
+        if photo_wrap and 'style' in photo_wrap.attrs:
+            style_text = photo_wrap['style']
+            img_m = re.search(r"url\(['\"]?(.*?)['\"]?\)", style_text)
+            if img_m:
+                img_url = img_m.group(1)
+                
+        items.append({
+            "guid": guid,
+            "title": title[:80],
+            "text": raw_text,
+            "enclosure_url": img_url
+        })
+        
     return items
 
-# --- GROQ AI COPYRIGHT-FREE REWRITING ---
+# --- GROQ AI COPYRIGHT-FREE REWRITER ---
 def rewrite_with_groq(text: str) -> str:
     print("⏳ Rewriting text via Groq AI to make it copyright-free...")
     try:
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are an expert content creator for Positron Academy. Rewrite the provided educational/news content to make it 100% unique, plagiarism-free, and engaging. Use an easy-to-understand mix of Hindi and English (Hinglish). Do not add any links or promotional tags."},
-                {"role": "user", "content": f"Transform this content into an original blog paragraph:\n\n{text}"}
+                {"role": "system", "content": "You are an expert educational content writer for Positron Academy. Rewrite the provided update to make it 100% unique, plagiarism-free, and highly engaging. Use a clean and professional mix of Hindi and English (Hinglish). Do not output any links or promotional credits."},
+                {"role": "user", "content": f"Transform this content into an original blog post:\n\n{text}"}
             ],
             model="llama3-8b-8192",
             temperature=0.6
@@ -151,46 +134,46 @@ def rewrite_with_groq(text: str) -> str:
         print(f"❌ Groq AI Error: {e}. Using original clean text.")
         return text
 
-# --- FIREWALL BYPASS WORDPRESS PUBLISHER ---
+# --- WORDPRESS FIREWALL BYPASS PUBLISHER ---
 def publish_to_wordpress(title, content):
-    print("⏳ Connecting to WordPress REST API...")
+    print("⏳ Creating Page on WordPress Website...")
     url = os.environ.get("WP_URL")
     user = os.environ.get("WP_USER")
     passwd = os.environ.get("WP_PASS")
 
-    # ModSecurity & Firewall Bypass Headers
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json'
     }
-    
-    data = {
-        'title': title,
-        'content': content,
-        'status': 'publish'
-    }
+    data = {'title': title, 'content': content, 'status': 'publish'}
 
     try:
         session = requests.Session()
         response = session.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
-        return response.status_code == 201
+        if response.status_code == 201:
+            wp_link = response.json().get("link", "")
+            print(f"✅ WordPress Page Created: {wp_link}")
+            return wp_link
+        else:
+            print(f"❌ WP Status Error: {response.status_code}")
+            return None
     except Exception as e:
         print(f"❌ WordPress POST Exception: {e}")
-        return False
+        return None
 
-# --- MAIN ENGINE ---
+# --- MAIN ENGINE CONTROLLER ---
 def main():
+    channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
     last_guid = read_last()
-    print(f"DEBUG: Last processed GUID from memory: {last_guid}")
+    print(f"DEBUG: Last GUID in memory: {last_guid}")
 
-    print("⏳ Downloading RSS Feed XML...")
-    xml = requests.get(FEED_URL, timeout=90).text
-    items = parse_all_items(xml)
-    
+    # Step 1: Fetch source channel messages via Scraper
+    items = fetch_telegram_channel_messages()
     if not items:
-        print("⚠️ No items found in the RSS Feed.")
+        print("⚠️ No valid text messages found in source channel.")
         return
 
+    # Filter out old messages using last_guid
     new_items = []
     for it in items:
         if last_guid and it["guid"] == last_guid:
@@ -198,35 +181,58 @@ def main():
         new_items.append(it)
 
     if not new_items:
-        print("✅ No new updates found. System is up to date.")
+        print("✅ No new posts found in the source channel.")
         return
 
-    # Oldest first order restore
+    # Oldest first sequence restore
     new_items.reverse()
 
     for it in new_items:
-        print(f"📥 Processing new item: {it['guid']}")
+        print(f"📥 Processing message ID: {it['guid']}")
         
-        # Step 1: AI Content Generation (Copyright-free)
-        unique_content = rewrite_with_groq(it["text"])
+        # 🔥 CRITICAL STEP: Purane saare weblinks message se remove karo
+        clean_source_text = remove_links(it["text"])
         
-        # Step 2: Handle attachments seamlessly inside content body
-        ctype = (it["enclosure_type"] or "").lower()
+        # Step 2: Groq AI Rewrite (Copyright free strategy)
+        ai_clean_text = rewrite_with_groq(clean_source_text)
+        
+        # Prepare content body for WordPress Page
+        wp_content = ai_clean_text
         if it["enclosure_url"]:
-            if ctype.startswith("image/"):
-                unique_content += f'<br><br><img src="{it["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
-            elif ctype == "application/pdf":
-                unique_content += f'<br><br>📄 <b>Attachment Notice:</b> Document link available in the original source.'
+            wp_content += f'<br><br><img src="{it["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-        # Step 3: WordPress Publish with Firewall Bypass
-        if publish_to_wordpress(it["title"], unique_content):
-            print(f"🚀 SUCCESS: Published to WordPress!")
-            write_last(it["guid"]) # Item publish hone par hi save hoga
+        # Step 3: Publish to Website to get New Link
+        new_page_link = publish_to_wordpress(it["title"], wp_content)
+        
+        if new_page_link:
+            # Step 4: Final text structure for the New Telegram Group
+            telegram_caption = (
+                f"📢 **New Educational Update**\n\n"
+                f"{ai_clean_text}\n\n"
+                f"🌐 **Poori details aur official tables website par dekhein:**\n{new_page_link}"
+            ).strip()
+
+            # Step 5: Route to new group with image if available
+            if it["enclosure_url"]:
+                try:
+                    img = requests.get(it["enclosure_url"], timeout=180)
+                    for ch in channels:
+                        tg_send_photo_bytes(img.content, telegram_caption, ch)
+                except Exception as e:
+                    print(f"⚠️ Image download error: {e}. Sending text instead.")
+                    for ch in channels:
+                        tg_send_text(telegram_caption, ch)
+            else:
+                for ch in channels:
+                    tg_send_text(telegram_caption, ch)
+            
+            print(f"🚀 SUCCESS: Processed and forwarded to new group!")
+            write_last(it["guid"])
         else:
-            print("❌ FAILED to bypass or publish to WordPress. Stopping batch.")
+            print("❌ WordPress publishing failed. Stopping batch.")
             break
 
-        time.sleep(2) # Cooldown to protect rate limits
+        time.sleep(3)
 
 if __name__ == "__main__":
     main()
