@@ -117,6 +117,7 @@ def fetch_telegram_channel_messages():
         lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
         title = lines[0] if lines else "New Update"
         
+        # Image check
         img_url = None
         photo_wrap = block.find('a', class_='tgme_widget_message_photo_wrap')
         if photo_wrap and 'style' in photo_wrap.attrs:
@@ -125,11 +126,24 @@ def fetch_telegram_channel_messages():
             if img_m:
                 img_url = img_m.group(1)
                 
+        # 🔥 ROOT MSG PDF EXTRACTOR: Root message post ke andar hi direct attached document/PDF link nikal rahe hain
+        doc_url = None
+        doc_anchor = block.find('a', class_=lambda x: x and 'document' in x)
+        if doc_anchor and doc_anchor.get('href'):
+            doc_url = doc_anchor['href']
+        else:
+            doc_block = block.find(class_=lambda x: x and 'document' in x)
+            if doc_block:
+                a_tag = doc_block.find('a', href=True)
+                if a_tag:
+                    doc_url = a_tag['href']
+                
         items.append({
             "guid": guid,
             "title": title[:80],
             "text": raw_text,
-            "enclosure_url": img_url
+            "enclosure_url": img_url,
+            "doc_url": doc_url
         })
         
     return items
@@ -203,38 +217,22 @@ def main():
 
     print(f"📥 Processing ONLY the absolute latest message ID: {latest_item['guid']}")
     
+    # 🔥 DIRECT FIX: PDF URL seedhe message ke original post attachment se hi li jayegi
+    pdf_url = latest_item.get("doc_url")
+    
+    # Text content links check (Sirf WordPress article content scraping ke liye)
     found_links = URL_RE.findall(latest_item["text"])
-    pdf_url = None
     webpage_scraped_data = ""
     
     if found_links:
-        # 1. Check karo agar message ke andar hi direct koi PDF link hai
-        for link in found_links:
-            if link.lower().endswith(".pdf"):
-                pdf_url = link
-                break
-                
         primary_link = found_links[0]
-        
-        # 2. Agar direct PDF nahi hai, toh webpage scrape karo aur uske andar PDF dhoondo
-        if not primary_link.lower().endswith(".pdf") and not ("t.me/" in primary_link or "telegram.me/" in primary_link):
-            print(f"🌐 Deep Scraping Original Link Content: {primary_link}")
+        if not ("t.me/" in primary_link or "telegram.me/" in primary_link):
+            print(f"🌐 Deep Scraping External Webpage for Article Text: {primary_link}")
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 resp = requests.get(primary_link, headers=headers, timeout=25)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
-                    
-                    # Target Webpage ke andar se .pdf anchor tag nikalo
-                    if not pdf_url:
-                        for a_tag in soup.find_all('a', href=True):
-                            href = a_tag['href'].strip()
-                            if href.lower().endswith('.pdf'):
-                                pdf_url = urljoin(primary_link, href)
-                                print(f"🎯 Auto-Detected PDF inside Webpage HTML: {pdf_url}")
-                                break
-                    
-                    # Groq AI content parse
                     for element in soup(["script", "style", "nav", "footer", "header"]):
                         element.extract()
                     paragraphs = soup.find_all('p')
@@ -244,9 +242,9 @@ def main():
                     lines = (line.strip() for line in page_text.splitlines())
                     webpage_scraped_data = '\n'.join(line for line in lines if line)[:3500]
             except Exception as e:
-                print(f"⚠️ Link data fetch error: {e}")
+                print(f"⚠️ External Link text scrape error: {e}")
 
-    # Step 3: Groq AI Rewrite for WordPress Page
+    # Step 3: Groq AI Rewrite for WordPress Page Content
     ai_final_text = rewrite_with_groq(latest_item["text"], webpage_scraped_data)
     
     wp_content = ai_final_text
@@ -265,25 +263,25 @@ def main():
             f"🌐 **Poori details aur official circular website par dekhein:**\n{new_page_link}"
         ).strip()
 
-        # 🔥 Step 6: ROUTING PAYLOAD (PDF vs IMAGE vs TEXT)
+        # 🔥 Step 6: Direct Root Attached PDF Routing Execution
         if pdf_url:
-            print(f"⏳ Downloading and Processing PDF File...")
+            print(f"⏳ Downloading Root Attached PDF File: {pdf_url}")
             try:
                 pdf_resp = requests.get(pdf_url, timeout=300)
                 pdf_resp.raise_for_status()
                 
-                # Pikepdf Sanitizer Execution
+                # Pikepdf Sanitizer (Purane links saaf karne ke liye)
                 safe_pdf_bytes = sanitize_pdf_remove_links(pdf_resp.content)
                 
-                # Send Document with caption to all channels
+                # Naye document bytes ko modified caption ke sath send karega
                 for ch in channels:
                     tg_send_document_bytes(safe_pdf_bytes, "official_notification.pdf", telegram_caption, ch)
-                print("🚀 SUCCESS: Cleaned PDF Document + Caption sent to destination!")
+                print("🚀 SUCCESS: Root attached PDF Document + Modified caption sent to your channel!")
             except Exception as e:
                 print(f"❌ PDF routing failed: {e}. Falling back to image/text.")
-                pdf_url = None # Trigger fallback below
+                pdf_url = None 
 
-        # Fallback agar PDF nahi mila ya download fail ho gaya
+        # Fallback logic agar message ke sath direct PDF attached nahi tha
         if not pdf_url:
             if latest_item["enclosure_url"]:
                 try:
