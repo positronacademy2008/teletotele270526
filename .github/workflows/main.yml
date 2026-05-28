@@ -2,8 +2,14 @@ name: Telegram to WP Bot (Groq)
 
 on:
   schedule:
-    - cron: '0 */2 * * *' # Har 2 ghante mein run hoga (Quota safe)
-  workflow_dispatch: # Button dabakar manual run karne ke liye
+    - cron: '0 */2 * * *' # Har 2 ghante mein check karega
+  workflow_dispatch:
+    inputs:
+      delete_last:
+        description: 'Delete last.txt to process old message as new?'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -12,6 +18,13 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    # 🔥 Ye step last.txt ko delete karega agar aapne checkbox tick kiya hoga
+    - name: Force Process Old Message
+      if: ${{ github.event.inputs.delete_last == 'true' }}
+      run: |
+        rm -f last.txt
+        echo "✅ last.txt deleted! Bot will treat the last old message as brand new."
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -30,5 +43,13 @@ jobs:
         WP_USER: ${{ secrets.WP_USER }}
         WP_PASS: ${{ secrets.WP_PASS }}
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        DEST_CHANNEL: ${{ secrets.DEST_CHANNEL }}
       run: python bot.py
+
+    # Ye step last.txt ko wapas GitHub mein save karega
+    - name: Save state to last.txt
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        touch last.txt
+        git add last.txt
+        git diff-index --quiet HEAD || (git commit -m "Update last.txt" && git pull --rebase origin main && git push)
