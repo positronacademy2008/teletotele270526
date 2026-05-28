@@ -20,6 +20,7 @@ client = OpenAI(
 )
 
 URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
+TRUNC_END_RE = re.compile(r"""(?ix)(\s*\[\s*\.\.\.\s*\]\s*$)|(\s*\[\s*…\s*\]\s*$)|(\s*…\s*$)|(\s*\.\.\.\s*$)""")
 
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
@@ -47,6 +48,13 @@ def read_last():
 def write_last(val: str):
     open(LAST_FILE, "w", encoding="utf-8").write(val)
 
+def strip_tags(s: str) -> str:
+    s = html.unescape(s)
+    s = re.sub(r"<br\s*/?>", "\n", s)
+    s = re.sub(r"<.*?>", "", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
 def remove_links(s: str) -> str:
     s = URL_RE.sub("", s)
     s = re.sub(r"\(\s*\)", "", s)
@@ -54,14 +62,15 @@ def remove_links(s: str) -> str:
     s = re.sub(r"[ \t]{2,}", " ", s)
     return s.strip()
 
-# --- USERNAME REPLACER ---
+def remove_prefixes(s: str) -> str:
+    return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
+
 def fix_usernames(match):
     uname = match.group(0)
     if uname.lower() == "@shikshavibhag":
         return "@RAJASTHAN_TODAY"
     return "@KAPILRJ06"
 
-# --- PDF SANITIZER ---
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
     print("🧹 Sanitizing PDF...")
     try:
@@ -90,7 +99,6 @@ def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
         print(f"❌ Pikepdf error: {e}")
         return pdf_bytes
 
-# --- REAL BOT API ADVANCED PDF GRABBER ---
 def download_asli_pdf_from_telegram():
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
@@ -109,7 +117,6 @@ def download_asli_pdf_from_telegram():
     except Exception: pass
     return None
 
-# --- TELEGRAM CHANNEL HTML SCRAPER ---
 def fetch_telegram_channel_messages():
     username = FEED_URL.strip().replace("https://t.me/s/", "").replace("@", "")
     scrape_url = f"https://t.me/s/{username}"
@@ -118,6 +125,7 @@ def fetch_telegram_channel_messages():
     soup = BeautifulSoup(resp.text, 'html.parser')
     
     items = []
+    # HTML natively provides Oldest (top) to Newest (bottom) sequence
     for block in soup.find_all('div', class_='tgme_widget_message'):
         guid = block.get('data-post')
         text_block = block.find('div', class_='tgme_widget_message_text')
@@ -141,7 +149,6 @@ def fetch_telegram_channel_messages():
         items.append({"guid": guid, "title": title[:80], "text": raw_text, "enclosure_url": img_url, "doc_url": doc_url})
     return items
 
-# --- GROQ AI REWRITER ENGINE ---
 def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
     print("⏳ Rewriting content via Groq AI...")
     source_content = webpage_text if len(webpage_text) > 100 else telegram_text
@@ -162,7 +169,6 @@ def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
         print(f"❌ Groq AI Error: {e}")
         return telegram_text
 
-# --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
     print("⏳ Creating Page on WordPress Website...")
     url = os.environ.get("WP_URL")
@@ -170,8 +176,6 @@ def publish_to_wordpress(title, content):
     passwd = os.environ.get("WP_PASS")
 
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
-    
-    # 🔥 SUPER SHORT URL SLUG
     clean_slug = f"post-{int(time.time())}"
     
     data = {'title': title, 'content': content, 'status': 'publish', 'slug': clean_slug}
@@ -188,51 +192,70 @@ def publish_to_wordpress(title, content):
 # --- MAIN CONTROLLER ENGINE ---
 def main():
     channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
-    last_guid = read_last()
     
+    # 1. Fetch channel messages (Items are ordered Oldest -> Newest natively)
     items = fetch_telegram_channel_messages()
-    if not items: return
+    if not items:
+        print("⚠️ No valid data extracted from source channel preview.")
+        return
 
-    # 🔥 BATCH PROCESSING: Chhoote hue sabhi messages nikalna
+    # 2. 🔥 NEW BULLETPROOF last.txt LOGIC
+    last_guid = read_last()
+    print(f"🔍 Database Last GUID: {last_guid}")
+
     new_items = []
-    for it in items:
-        if last_guid and it["guid"] == last_guid:
-            break
-        new_items.append(it)
+    
+    if not last_guid:
+        print("📝 last.txt is EMPTY. Only processing the absolute LATEST message to avoid spam.")
+        new_items = [items[-1]]  # Pick the very last item
+    else:
+        found_idx = -1
+        for i, it in enumerate(items):
+            if it["guid"] == last_guid:
+                found_idx = i
+                break
+        
+        if found_idx != -1:
+            # ID matched! Take everything AFTER this ID. (Already Oldest->Newest order)
+            new_items = items[found_idx + 1 :]
+            if new_items:
+                print(f"✅ Found last processed ID. Processing {len(new_items)} new messages.")
+        else:
+            # ID not found! (Happens when channel is changed or message was deleted)
+            print("⚠️ last_guid NOT FOUND in the current channel feed. Channel might have changed.")
+            print("🔄 Resetting sequence... Processing ONLY the absolute LATEST message.")
+            new_items = [items[-1]]  # Pick the very last item
 
+    # 3. Check if there is anything to post
     if not new_items:
         print("✅ System is Up To Date. No new messages.")
         return
 
-    # Oldest se Newest sequence maintain karna
-    new_items.reverse()
-    print(f"📥 Found {len(new_items)} pending messages to process!")
-
+    # 4. Process exactly in the sequence defined
     for current_item in new_items:
         print(f"\n👉 Processing ID: {current_item['guid']}")
-        
         raw_text = current_item["text"]
+        ctype = "application/pdf" if current_item.get("doc_url") and ".pdf" in current_item["doc_url"].lower() else ""
         
-        # 🔥 REQUIREMENT 3: AD BLOCKING
+        # --- AD BLOCKING ---
         ad_keywords = ['t.me/+', 'sponsor', 'paid promo', 'aviator', 'betting', 'casino']
         if any(kw in raw_text.lower() for kw in ad_keywords):
             print("🚫 Promotional Ad detected. Skipping.")
             write_last(current_item["guid"])
             continue
 
-        # 🔥 REQUIREMENT 2: Key Replacement & Attachment Drops
+        # --- Keyword Drop (Requirement 2) ---
         if "शिक्षा विभाग समाचार राजस्थान" in raw_text:
             raw_text = raw_text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
             current_item["enclosure_url"] = None
             current_item["doc_url"] = None
+            ctype = ""
 
-        # 🔥 REQUIREMENT 4: Username replacement @
+        # --- Username Format (Requirement 4) ---
         raw_text = re.sub(r'@[A-Za-z0-9_]+', fix_usernames, raw_text)
         current_item["text"] = raw_text
 
-        # -----------------------------
-        # Webpage Scraping (For WP Text Only)
-        pdf_url = current_item.get("doc_url")
+        # --- Webpage Scrape ---
         found_links = URL_RE.findall(raw_text)
         webpage_scraped_data = ""
         
@@ -240,41 +263,33 @@ def main():
             primary_link = found_links[0]
             if not ("t.me/" in primary_link or "telegram.me/" in primary_link):
                 try:
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    resp = requests.get(primary_link, headers=headers, timeout=25)
+                    resp = requests.get(primary_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=25)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, 'html.parser')
-                        
-                        # 🔥 REQUIREMENT 5: Important links extraction except indianaukrihelp
                         for a in soup.find_all('a', href=True):
                             href = a['href']
                             if "indianaukrihelp.com" not in href and href.startswith("http"):
                                 a.replace_with(f"{a.get_text()} (Link: {href})")
-                                
                         for element in soup(["script", "style", "nav", "footer", "header"]):
                             element.extract()
-                            
-                        page_text = soup.get_text(separator="\n")
-                        page_text = page_text.replace("indianaukrihelp.com", "")
-                        page_text = page_text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
-                        
+                        page_text = soup.get_text(separator="\n").replace("indianaukrihelp.com", "").replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
                         lines = (line.strip() for line in page_text.splitlines())
                         webpage_scraped_data = '\n'.join(line for line in lines if line)[:3500]
                 except Exception: pass
 
-        # AI Rewrite
+        # AI Edit & WP Publish
         ai_final_text = rewrite_with_groq(raw_text, webpage_scraped_data)
-        
         wp_content = ai_final_text
-        if current_item["enclosure_url"]:
+        if current_item["enclosure_url"] and not current_item.get("doc_url"):
             wp_content += f'<br><br><img src="{current_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-        new_page_link = publish_to_wordpress(current_item["title"], wp_content)
+        new_page_link = publish_to_wordpress(current_item["title"][:50], wp_content)
         
         if new_page_link:
-            # 🔥 REQUIREMENT 1: Remove `[...]` Heading from Telegram Text
+            # Heading/URL cleanup (Requirement 1)
             clean_root_message = remove_links(raw_text)
-            clean_root_message = re.sub(r'^(.*?(?:\[\.\.\.\]|\.\.\.|…))\s*\n+', '', clean_root_message).strip()
+            clean_root_message = TRUNC_END_RE.sub("", clean_root_message).strip()
+            clean_root_message = re.sub(r'^(.*?)\s*\n+\1', r'\1', clean_root_message, flags=re.S).strip()
             
             telegram_caption = (
                 f"{clean_root_message}\n\n"
@@ -284,7 +299,8 @@ def main():
                 f"{FOLLOW_LINE_WA}"
             ).strip()
 
-            if pdf_url:
+            # Dispath
+            if current_item.get("doc_url") or ctype == "application/pdf":
                 pdf_bytes = download_asli_pdf_from_telegram()
                 if pdf_bytes:
                     safe_pdf_bytes = sanitize_pdf_remove_links(pdf_bytes)
@@ -300,7 +316,7 @@ def main():
             else:
                 for ch in channels: tg_send_text(telegram_caption, ch)
             
-            print(f"🚀 SUCCESS: Processed and Saved.")
+            # 🔥 SUCCESS: Mark this specific message as done
             write_last(current_item["guid"])
         else:
             print("❌ WordPress failed. Stopping batch to prevent sequence break.")
