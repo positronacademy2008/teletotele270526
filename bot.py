@@ -1,5 +1,6 @@
 import os, re, html, time, io
 import requests
+from bs4 import BeautifulSoup
 import pikepdf
 from openai import OpenAI
 
@@ -7,7 +8,7 @@ from openai import OpenAI
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DEST_CHANNELS = os.environ["DEST_CHANNEL"]
 FEED_URL = os.environ["FEED_URL"]
-FOLLOW_LINE = os.environ.get("FOLLOW_LINE", "📢 Follow @topgkguru")
+FOLLOW_LINE = os.environ.get("FOLLOW_LINE", "📢 Follow TELEGRAM WHATSAPP https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q | TELEGRAM https://t.me/RAJASTHAN_TODAY")
 LAST_FILE = "last.txt"
 
 # Setup Groq AI
@@ -18,12 +19,7 @@ client = OpenAI(
 
 # Regex Patterns
 URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
-TRUNC_END_RE = re.compile(r"""(?ix)
-(\s*\[\s*\.\.\.\s*\]\s*$)|
-(\s*\[\s*…\s*\]\s*$)|
-(\s*…\s*$)|
-(\s*\.\.\.\s*$)
-""")
+TRUNC_END_RE = re.compile(r"""(?ix)(\s*\[\s*\.\.\.\s*\]\s*$)|(\s*\[\s*…\s*\]\s*$)|(\s*…\s*$)|(\s*\.\.\.\s*$)""")
 
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
@@ -66,13 +62,14 @@ def remove_links(s: str) -> str:
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
-def normalize(s: str) -> str:
-    s = TRUNC_END_RE.sub("", s).strip()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
 def remove_prefixes(s: str) -> str:
     return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
+
+def fix_usernames(match):
+    uname = match.group(0)
+    if uname.lower() == "@shikshavibhag":
+        return "@RAJASTHAN_TODAY"
+    return "@KAPILRJ06"
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
     print("🧹 Sanitizing PDF...")
@@ -141,13 +138,14 @@ def parse_all_items(xml: str):
     return items
 
 # --- GROQ AI & WORDPRESS ---
-def rewrite_with_groq(text: str) -> str:
+def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
     print("⏳ Rewriting content via Groq AI...")
+    source_content = webpage_text if len(webpage_text) > 100 else telegram_text
     try:
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a professional educational blog writer for Positron Academy. Rewrite the provided data into a comprehensive, detailed, 100% unique, and plagiarism-free article for a website post in Hinglish. No external URLs."},
-                {"role": "user", "content": f"Create an original detailed website article based on this information:\n\n{text}"}
+                {"role": "system", "content": "You are a professional educational blog writer for Positron Academy. Rewrite the provided data into a comprehensive, detailed, 100% unique, and plagiarism-free article for a website post in Hinglish. Do NOT include any links related to 'indianaukrihelp.com'."},
+                {"role": "user", "content": f"Create an original detailed website article based on this information:\n\n{source_content}"}
             ],
             model="llama-3.1-8b-instant",
             temperature=0.5
@@ -155,7 +153,7 @@ def rewrite_with_groq(text: str) -> str:
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ Groq AI Error: {e}")
-        return text
+        return telegram_text
 
 def publish_to_wordpress(title, content):
     print("⏳ Posting to WordPress...")
@@ -164,19 +162,11 @@ def publish_to_wordpress(title, content):
     passwd = os.environ.get("WP_PASS")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json'
     }
-    
-    # 🔥 FIX 2: Generate Short Clean URL slug (update-timestamp)
     short_slug = f"update-{int(time.time() * 1000)}"
-
-    data = {
-        'title': title, 
-        'content': content, 
-        'status': 'publish',
-        'slug': short_slug
-    }
+    data = {'title': title, 'content': content, 'status': 'publish', 'slug': short_slug}
 
     try:
         response = requests.post(url, auth=(user, passwd), data=data, headers=headers, timeout=90)
@@ -184,6 +174,7 @@ def publish_to_wordpress(title, content):
             return response.json().get("link", "")
         else:
             print(f"❌ WP Status Code: {response.status_code}")
+            print(f"❌ WP ERROR DETAILS: {response.text}") # Ye line exact error batayegi
     except Exception as e:
         print(f"❌ WordPress Error: {e}")
     return None
@@ -200,70 +191,121 @@ def main():
     items = parse_all_items(xml)
     
     if not items:
-        print("No items found")
+        print("❌ No items found in XML Feed.")
         return
 
-    # 🔥 FIX 1: Pata lagao kitne naye messages hain (Batch Processing)
+    # --- BATCH PROCESSING LOGIC ---
     new_items = []
-    for it in items:
-        if last_guid and it["guid"] == last_guid:
-            break
-        new_items.append(it)
+    if not last_guid:
+        print("📝 last.txt is EMPTY. Fetching ALL messages.")
+        new_items = items
+    else:
+        for it in items:
+            if it["guid"] == last_guid:
+                break
+            new_items.append(it)
 
     if not new_items:
         print("✅ No new posts found. Everything is up to date.")
         return
 
-    # Purane se naye ki taraf process karna taki sequence sahi rahe
+    # Oldest to Newest
     new_items.reverse()
     print(f"📥 Found {len(new_items)} new messages to process!")
 
-    for latest_item in new_items:
-        print(f"\n👉 Processing message ID: {latest_item['guid']}")
+    for current_item in new_items:
+        print(f"\n👉 Processing message ID: {current_item['guid']}")
 
-        # Clean links from original text
-        clean_original_text = remove_links(latest_item['text'])
+        raw_text = current_item['text']
+        ctype = (current_item["enclosure_type"] or "").lower()
+
+        # 🔥 RULE 3: AD BLOCKING
+        ad_keywords = ['t.me/+', 'sponsor', 'paid promo', 'aviator', 'betting', 'casino']
+        if any(kw in raw_text.lower() for kw in ad_keywords):
+            print("🚫 Promotional Ad detected. Skipping.")
+            write_last(current_item["guid"])
+            continue
+
+        # 🔥 RULE 2: KEYWORD REPLACE & DROP ATTACHMENTS
+        if "शिक्षा विभाग समाचार राजस्थान" in raw_text:
+            raw_text = raw_text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
+            current_item["enclosure_url"] = None
+            ctype = ""
+
+        # 🔥 RULE 4: USERNAME REPLACE
+        raw_text = re.sub(r'@[A-Za-z0-9_]+', fix_usernames, raw_text)
+
+        # 🔥 RULE 5: WEBPAGE SCRAPING (Ignore indianaukrihelp)
+        found_links = URL_RE.findall(raw_text)
+        webpage_scraped_data = ""
         
+        if found_links:
+            primary_link = found_links[0]
+            if "indianaukrihelp.com" not in primary_link and not primary_link.startswith("https://t.me/"):
+                print(f"🌐 Scraping External Link: {primary_link}")
+                try:
+                    resp = requests.get(primary_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=25)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, 'html.parser')
+                        for a in soup.find_all('a', href=True):
+                            href = a['href']
+                            if "indianaukrihelp.com" not in href and href.startswith("http"):
+                                a.replace_with(f"{a.get_text()} (Link: {href})")
+                        for element in soup(["script", "style", "nav", "footer", "header"]):
+                            element.extract()
+                        page_text = soup.get_text(separator="\n").replace("indianaukrihelp.com", "").replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
+                        lines = (line.strip() for line in page_text.splitlines())
+                        webpage_scraped_data = '\n'.join(line for line in lines if line)[:3500]
+                except Exception as e:
+                    print(f"⚠️ Scraping failed: {e}")
+
         # AI Website content creation
-        ai_wp_content = rewrite_with_groq(clean_original_text)
+        ai_wp_content = rewrite_with_groq(raw_text, webpage_scraped_data)
         
         wp_body = ai_wp_content
-        ctype = (latest_item["enclosure_type"] or "").lower()
-        
-        # Insert Image in WP Post if exists
-        if latest_item["enclosure_url"] and ctype.startswith("image/"):
-            wp_body += f'<br><br><img src="{latest_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
+        if current_item["enclosure_url"] and ctype.startswith("image/"):
+            wp_body += f'<br><br><img src="{current_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
         # Publish to Website
-        new_wp_link = publish_to_wordpress(latest_item["title"], wp_body)
+        new_wp_link = publish_to_wordpress(current_item["title"], wp_body)
 
         if new_wp_link:
-            # 🔥 FIX 3: Caption se "**Website Link:**" hata diya gaya
+            # 🔥 RULE 1: Remove `[...]` and Double Headings from Caption
+            clean_caption = remove_links(raw_text)
+            clean_caption = TRUNC_END_RE.sub("", clean_caption).strip()
+            # Double heading htane ka powerful regex
+            clean_caption = re.sub(r'^(.*?)\s*\n+\1', r'\1', clean_caption, flags=re.S).strip()
+
             telegram_caption = (
-                f"🔥 New Update\n\n"
-                f"{clean_original_text}\n\n"
+                f"{clean_caption}\n\n"
                 f"🌐 {new_wp_link}\n\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"{FOLLOW_LINE}"
             ).strip()
 
             # Route Payload properly
-            if latest_item["enclosure_url"] and ctype == "application/pdf":
+            if current_item["enclosure_url"] and ctype == "application/pdf":
                 print("⏳ Downloading original PDF from RSS Enclosure...")
-                pdf = requests.get(latest_item["enclosure_url"], timeout=300)
-                pdf.raise_for_status()
-                safe_pdf = sanitize_pdf_remove_links(pdf.content)
+                try:
+                    pdf = requests.get(current_item["enclosure_url"], timeout=300)
+                    pdf.raise_for_status()
+                    safe_pdf = sanitize_pdf_remove_links(pdf.content)
+                    for ch in channels:
+                        tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
+                    print("🚀 SUCCESS: PDF Document sent!")
+                except Exception as e:
+                    print(f"❌ PDF Failed: {e}. Sending text instead.")
+                    for ch in channels: tg_send_text(telegram_caption, ch)
                 
-                for ch in channels:
-                    tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
-                print("🚀 SUCCESS: PDF Document sent!")
-                
-            elif latest_item["enclosure_url"] and ctype.startswith("image/"):
-                img = requests.get(latest_item["enclosure_url"], timeout=180)
-                img.raise_for_status()
-                for ch in channels:
-                    tg_send_photo_bytes(img.content, telegram_caption, ch)
-                print("🚀 SUCCESS: Image sent!")
+            elif current_item["enclosure_url"] and ctype.startswith("image/"):
+                try:
+                    img = requests.get(current_item["enclosure_url"], timeout=180)
+                    img.raise_for_status()
+                    for ch in channels:
+                        tg_send_photo_bytes(img.content, telegram_caption, ch)
+                    print("🚀 SUCCESS: Image sent!")
+                except:
+                    for ch in channels: tg_send_text(telegram_caption, ch)
                 
             else:
                 for ch in channels:
@@ -271,12 +313,11 @@ def main():
                 print("🚀 SUCCESS: Text sent!")
 
             # Finalize and Save id
-            write_last(latest_item["guid"])
+            write_last(current_item["guid"])
         else:
             print("❌ Stopping batch. WordPress post failed for this item.")
             break
         
-        # Thoda gap dena zaruri hai taaki spam na lage aur limit cross na ho
         time.sleep(3)
 
 if __name__ == "__main__":
