@@ -1,4 +1,4 @@
-import os, requests, json
+import os, requests, time, random
 from openai import OpenAI
 
 # --- 1. GROQ SETUP ---
@@ -14,40 +14,58 @@ def get_telegram_data():
     print("⏳ Fetching from Telegram...")
     try:
         resp = requests.get(url, timeout=30).json()
+        
+        # Scenario A: Agar Telegram par NAYA message mil jata hai
         if resp.get("ok") and len(resp["result"]) > 0:
-            # Sabse latest message uthao (list ka aakhri item)
             latest_update = resp["result"][-1]
             update_id = str(latest_update["update_id"])
             
-            # Channel aur Normal Message dono handle karega
             text = None
             if "message" in latest_update and "text" in latest_update["message"]:
                 text = latest_update["message"]["text"]
             elif "channel_post" in latest_update and "text" in latest_update["channel_post"]:
                 text = latest_update["channel_post"]["text"]
                 
-            if not text:
-                print("⚠️ Message found, but it has no text (might be an image or sticker).")
-                return None, None
-                
-            # Check if this message was already processed
-            if os.path.exists("last.txt"):
-                with open("last.txt", "r") as f:
-                    last_id = f.read().strip()
-                if last_id == update_id:
-                    print("⚠️ No new message found. Already processed this one.")
-                    return None, None
-            
-            return text, update_id
-        else:
-            print("⚠️ Telegram API returned 0 messages.")
-            return None, None
+            if text:
+                # Check if already processed
+                if os.path.exists("last.txt"):
+                    with open("last.txt", "r") as f:
+                        last_id = f.read().strip()
+                    if last_id == update_id:
+                        print("⚠️ Telegram message is old. Switching to Test Mode Messages...")
+                        return get_testing_fallback_message()
+                return text, update_id
+
+        # Scenario B: Telegram khali hai, toh TESTING MODE chalega
+        print("⚠️ Telegram API returned 0 new messages.")
+        return get_testing_fallback_message()
+
     except Exception as e:
-        print(f"❌ Telegram Error: {e}")
-        return None, None
+        print(f"❌ Telegram Error: {e}. Switching to Test Mode...")
+        return get_testing_fallback_message()
+
+def get_testing_fallback_message():
+    """
+    🔥 TESTING MODE: Yahan aap apne purane bheje gaye messages daal do.
+    Bot har baar inmein se ek message random utha kar test karega.
+    """
+    print("🧪 TESTING MODE ACTIVE: Using old messages database...")
+    
+    old_messages_pool = [
+        "Science News: Positron Academy successfully launched new AI batch for students!",
+        "Chemistry Class Update: Important formulas and notes for Class IX chemical bonding are now available.",
+        "Admissions Open: New batches starting soon for professional courses session 2025-2027."
+    ]
+    
+    # Har baar random message uthayega taaki WordPress par alag content jaye
+    selected_msg = random.choice(old_messages_pool)
+    
+    # Fake dynamic update_id bana rahe hain timestamp se, taaki last.txt ise kabhi block na kare
+    fake_update_id = "test_" + str(int(time.time()))
+    
+    return selected_msg, fake_update_id
 
 def save_last_id(update_id):
-    # Process hone ke baad ID save kar do
     with open("last.txt", "w") as f:
         f.write(update_id)
 
@@ -56,8 +74,8 @@ def get_groq_content(msg):
     try:
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a professional blog writer for Positron Academy. Write an engaging, professional update in a mix of Hindi and English."},
-                {"role": "user", "content": f"Rewrite this as an engaging post: {msg}"}
+                {"role": "system", "content": "You are a professional blog writer for Positron Academy. Write an engaging, professional update in a mix of Hindi and English (Hinglish)."},
+                {"role": "user", "content": f"Rewrite this text into a small professional blog post: {msg}"}
             ],
             model="llama3-8b-8192", 
             temperature=0.7
@@ -73,7 +91,6 @@ def publish_to_wp(title, content):
     user = os.environ.get("WP_USER")
     passwd = os.environ.get("WP_PASS")
     
-    # Firewall Bypass Headers
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'application/json'
@@ -83,27 +100,26 @@ def publish_to_wp(title, content):
     try:
         session = requests.Session()
         response = session.post(url, auth=(user, passwd), data=data, headers=headers, timeout=60)
-        
-        if response.status_code == 201:
-            print("✅ SUCCESS: Post Published to WordPress!")
-            return True
-        else:
-            print(f"❌ WP ERROR: {response.status_code} - {response.text}")
-            return False
+        return response.status_code == 201
     except Exception as e:
         print(f"❌ WP Exception: {e}")
         return False
 
 # --- MAIN LOGIC ---
 if __name__ == "__main__":
+    print("🚀 Starting Positron Bot Testing...")
+    
     msg, update_id = get_telegram_data()
     
     if msg and update_id:
-        print(f"📥 Fetched Text: {msg[:50]}...")
+        print(f"📥 Processing Text: {msg}")
         
         final_content = get_groq_content(msg)
         
-        if publish_to_wp("Positron Academy Daily Update", final_content):
-            save_last_id(update_id) # Tabi save hoga jab WP par post ho jayega
+        if publish_to_wp("Positron Academy Live Update", final_content):
+            save_last_id(update_id)
+            print("🚀 SUCCESS: Posted to WordPress!")
+        else:
+            print("❌ WP Publish Failed.")
     else:
-        print("🛑 Task stopped. Waiting for new messages.")
+        print("🛑 Task stopped.")
