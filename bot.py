@@ -3,13 +3,16 @@ import requests
 from bs4 import BeautifulSoup
 import pikepdf
 from openai import OpenAI
-from urllib.parse import urljoin
 
 # --- CONFIGURATION & ENV VARIABLES ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DEST_CHANNELS = os.environ["DEST_CHANNEL"] # Comma-separated: @ch1,@ch2
-FEED_URL = os.environ["FEED_URL"]          # Source Telegram Channel
+FEED_URL = os.environ["FEED_URL"]          # Source Telegram Channel Username/Link
 LAST_FILE = "last.txt"
+
+# 🔥 AAPKE FOLLOW LINKS (Aap yahan se links change bhi kar sakte hain)
+FOLLOW_LINE_TG = "📢 Join Telegram: https://t.me/topgkguru"
+FOLLOW_LINE_WA = "📢 Join WhatsApp Channel: https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q"
 
 # Setup Groq AI Client
 client = OpenAI(
@@ -17,7 +20,7 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# Links detect karne aur hatane ke liye Regex
+# Links clean karne ke liye Regex
 URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
 TRUNC_END_RE = re.compile(r"""(?ix)
 (\s*\[\s*\.\.\.\s*\]\s*$)|
@@ -32,7 +35,7 @@ def tg_send_text(text: str, channel: str):
     requests.post(url, json={
         "chat_id": channel,
         "text": text[:3900],
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True
     }, timeout=60).raise_for_status()
 
 def tg_send_photo_bytes(photo_bytes: bytes, caption: str, channel: str):
@@ -67,29 +70,68 @@ def remove_links(s: str) -> str:
 # --- ORIGINAL PIKEPDF LINK SANITIZER ---
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
     print("🧹 Sanitizing PDF: Removing internal/external clickable links...")
-    src = pikepdf.Pdf.open(io.BytesIO(pdf_bytes))
-    for page in src.pages:
-        annots = page.get("/Annots", None)
-        if not annots: continue
-        new_annots = []
-        for a in annots:
-            try:
-                obj = a.get_object()
-            except Exception: continue
-            if "/A" in obj: del obj["/A"]
-            if "/AA" in obj: del obj["/AA"]
-            if "/Dest" in obj: del obj["/Dest"]
-            if obj.get("/Subtype", None) == pikepdf.Name("/Link"): continue
-            new_annots.append(a)
-        if new_annots:
-            page["/Annots"] = pikepdf.Array(new_annots)
-        else:
-            if "/Annots" in page: del page["/Annots"]
-    out = io.BytesIO()
-    src.save(out)
-    return out.getvalue()
+    try:
+        src = pikepdf.Pdf.open(io.BytesIO(pdf_bytes))
+        for page in src.pages:
+            annots = page.get("/Annots", None)
+            if not annots: continue
+            new_annots = []
+            for a in annots:
+                try:
+                    obj = a.get_object()
+                except Exception: continue
+                if "/A" in obj: del obj["/A"]
+                if "/AA" in obj: del obj["/AA"]
+                if "/Dest" in obj: del obj["/Dest"]
+                if obj.get("/Subtype", None) == pikepdf.Name("/Link"): continue
+                new_annots.append(a)
+            if new_annots:
+                page["/Annots"] = pikepdf.Array(new_annots)
+            else:
+                if "/Annots" in page: del page["/Annots"]
+        out = io.BytesIO()
+        src.save(out)
+        return out.getvalue()
+    except Exception as e:
+        print(f"❌ Pikepdf error during sanitization: {e}")
+        return pdf_bytes
 
-# --- TELEGRAM CHANNEL HTML SCRAPER ---
+# --- 🔥 REAL BOT API ADVANCED PDF GRABBER ---
+def download_asli_pdf_from_telegram():
+    """
+    Telegram getUpdates long polling se seedhe asli binary PDF download 
+    karega taaki file corrupt na ho.
+    """
+    print("⏳ Fetching original PDF binary from Telegram Bot API updates...")
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+        resp = requests.get(url, timeout=30).json()
+        if resp.get("ok") and len(resp["result"]) > 0:
+            # Piche se search karenge latest update ke liye
+            for update in reversed(resp["result"]):
+                message_node = update.get("message") or update.get("channel_post")
+                if message_node and "document" in message_node:
+                    doc = message_node["document"]
+                    if doc.get("mime_type") == "application/pdf" or doc.get("file_name", "").lower().endswith(".pdf"):
+                        file_id = doc["file_id"]
+                        
+                        # Get File Path
+                        path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+                        path_resp = requests.get(path_url).json()
+                        if path_resp.get("ok"):
+                            file_path = path_resp["result"]["file_path"]
+                            
+                            # Download Asli File Stream
+                            download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                            print(f"🎯 Downloading raw PDF from: {download_url}")
+                            file_data = requests.get(download_url, timeout=120).content
+                            return file_data
+        print("⚠️ No raw PDF attachment found directly inside recent Bot API buffer.")
+    except Exception as e:
+        print(f"❌ Real PDF Grabber Error: {e}")
+    return None
+
+# --- TELEGRAM CHANNEL WEB PREVIEW SCRAPER ---
 def fetch_telegram_channel_messages():
     username = FEED_URL.strip()
     if "t.me/" in username:
@@ -97,7 +139,7 @@ def fetch_telegram_channel_messages():
     username = username.split("/")[0].replace("@", "").strip()
     
     scrape_url = f"https://t.me/s/{username}"
-    print(f"⏳ Scraping Source Telegram Channel: {scrape_url}")
+    print(f"⏳ Scraping Source Telegram Channel Preview: {scrape_url}")
     
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     resp = requests.get(scrape_url, headers=headers, timeout=60)
@@ -115,9 +157,8 @@ def fetch_telegram_channel_messages():
         
         raw_text = text_block.get_text(separator='\n').strip()
         lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
-        title = lines[0] if lines else "New Update"
+        title = lines[0] if lines else "New Educational Update"
         
-        # Image check
         img_url = None
         photo_wrap = block.find('a', class_='tgme_widget_message_photo_wrap')
         if photo_wrap and 'style' in photo_wrap.attrs:
@@ -126,49 +167,34 @@ def fetch_telegram_channel_messages():
             if img_m:
                 img_url = img_m.group(1)
                 
-        # 🔥 ROOT MSG PDF EXTRACTOR: Root message post ke andar hi direct attached document/PDF link nikal rahe hain
-        doc_url = None
-        doc_anchor = block.find('a', class_=lambda x: x and 'document' in x)
-        if doc_anchor and doc_anchor.get('href'):
-            doc_url = doc_anchor['href']
-        else:
-            doc_block = block.find(class_=lambda x: x and 'document' in x)
-            if doc_block:
-                a_tag = doc_block.find('a', href=True)
-                if a_tag:
-                    doc_url = a_tag['href']
-                
         items.append({
             "guid": guid,
             "title": title[:80],
             "text": raw_text,
-            "enclosure_url": img_url,
-            "doc_url": doc_url
+            "enclosure_url": img_url
         })
         
     return items
 
 # --- GROQ AI REWRITER ENGINE ---
-def rewrite_with_groq(telegram_text: str, webpage_text: str) -> str:
-    print("⏳ Rewriting content via Groq AI (Active Model: llama-3.1-8b-instant)...")
-    source_content = webpage_text if len(webpage_text) > 100 else telegram_text
-    
+def rewrite_with_groq(text: str) -> str:
+    print("⏳ Rewriting text via Groq AI (Active Model: llama-3.1-8b-instant)...")
     try:
         response = client.chat.completions.create(
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are a professional educational blog writer for Positron Academy. Rewrite the provided data into a comprehensive, detailed, 100% unique, and plagiarism-free article paragraph for a website post. Write in an engaging mix of Hindi and English (Hinglish). Do NOT include any external URLs, links or source channel credits."
+                    "content": "You are a senior professional educational content writer for Positron Academy. Rewrite the provided announcement text to make it 100% unique, plagiarism-free, and clean for a website post. Write in an engaging mix of Hindi and English (Hinglish). Do NOT include any external URLs, links, or original group credit names."
                 },
-                {"role": "user", "content": f"Create an original detailed website article based on this information:\n\n{source_content}"}
+                {"role": "user", "content": f"Transform this update into an original website post body:\n\n{text}"}
             ],
             model="llama-3.1-8b-instant", 
             temperature=0.5
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Groq AI Error: {e}. Using original message text as backup.")
-        return telegram_text
+        print(f"❌ Groq AI Error: {e}. Using fallback.")
+        return text
 
 # --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
@@ -178,7 +204,7 @@ def publish_to_wordpress(title, content):
     passwd = os.environ.get("WP_PASS")
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json'
     }
     data = {'title': title, 'content': content, 'status': 'publish'}
@@ -191,7 +217,7 @@ def publish_to_wordpress(title, content):
             print(f"✅ WordPress Page Created Successfully: {wp_link}")
             return wp_link
         else:
-            print(f"❌ WP Status Error: {response.status_code} - {response.text}")
+            print(f"❌ WP Status Error: {response.status_code}")
             return None
     except Exception as e:
         print(f"❌ WordPress POST Exception: {e}")
@@ -205,7 +231,7 @@ def main():
 
     items = fetch_telegram_channel_messages()
     if not items:
-        print("⚠️ No valid data extracted from source channel.")
+        print("⚠️ No valid data extracted from source channel preview.")
         return
 
     # Sirf absolute list ka aakhri item (latest) uthao
@@ -217,88 +243,64 @@ def main():
 
     print(f"📥 Processing ONLY the absolute latest message ID: {latest_item['guid']}")
     
-    # 🔥 DIRECT FIX: PDF URL seedhe message ke original post attachment se hi li jayegi
-    pdf_url = latest_item.get("doc_url")
+    # Clean old links from text for AI processing
+    clean_source_msg_text = remove_links(latest_item["text"])
     
-    # Text content links check (Sirf WordPress article content scraping ke liye)
-    found_links = URL_RE.findall(latest_item["text"])
-    webpage_scraped_data = ""
-    
-    if found_links:
-        primary_link = found_links[0]
-        if not ("t.me/" in primary_link or "telegram.me/" in primary_link):
-            print(f"🌐 Deep Scraping External Webpage for Article Text: {primary_link}")
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                resp = requests.get(primary_link, headers=headers, timeout=25)
-                if resp.status_code == 200:
-                    soup = BeautifulSoup(resp.text, 'html.parser')
-                    for element in soup(["script", "style", "nav", "footer", "header"]):
-                        element.extract()
-                    paragraphs = soup.find_all('p')
-                    page_text = "\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
-                    if not page_text:
-                        page_text = soup.get_text(separator="\n")
-                    lines = (line.strip() for line in page_text.splitlines())
-                    webpage_scraped_data = '\n'.join(line for line in lines if line)[:3500]
-            except Exception as e:
-                print(f"⚠️ External Link text scrape error: {e}")
-
-    # Step 3: Groq AI Rewrite for WordPress Page Content
-    ai_final_text = rewrite_with_groq(latest_item["text"], webpage_scraped_data)
+    # Step 2: Groq AI Rewrite for website content
+    ai_final_text = rewrite_with_groq(clean_source_msg_text, "")
     
     wp_content = ai_final_text
     if latest_item["enclosure_url"]:
         wp_content += f'<br><br><img src="{latest_item["enclosure_url"]}" alt="Update Image" style="max-width:100%;">'
 
-    # Step 4: WordPress Publisher
+    # Step 3: WordPress Publisher
     new_page_link = publish_to_wordpress(latest_item["title"], wp_content)
     
     if new_page_link:
-        # Step 5: Clean root message for Telegram destination group
-        clean_root_message = remove_links(latest_item["text"])
-        
+        # 🔥 Step 4: MODIFIED CAPTION STRUCTURING WITH FOLLOW LINKS
         telegram_caption = (
-            f"{clean_root_message}\n\n"
-            f"🌐 **Poori details aur official circular website par dekhein:**\n{new_page_link}"
+            f"{clean_source_msg_text}\n\n"
+            f"🌐 **Poori details website par dekhein:**\n{new_page_link}\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{FOLLOW_LINE_TG}\n"
+            f"{FOLLOW_LINE_WA}"
         ).strip()
 
-        # 🔥 Step 6: Direct Root Attached PDF Routing Execution
-        if pdf_url:
-            print(f"⏳ Downloading Root Attached PDF File: {pdf_url}")
+        # 🔥 Step 5: ADVANCED REAL PDF CHECK & ROUTING
+        # Pehle check karega agar direct dynamic buffer se binary PDF milta hai
+        pdf_content_bytes = download_asli_pdf_from_telegram()
+        
+        if pdf_content_bytes:
             try:
-                pdf_resp = requests.get(pdf_url, timeout=300)
-                pdf_resp.raise_for_status()
+                # Purane clickable links hatane ke liye Sanitizer chalega
+                safe_pdf_bytes = sanitize_pdf_remove_links(pdf_content_bytes)
                 
-                # Pikepdf Sanitizer (Purane links saaf karne ke liye)
-                safe_pdf_bytes = sanitize_pdf_remove_links(pdf_resp.content)
-                
-                # Naye document bytes ko modified caption ke sath send karega
+                # Send authentic PDF to all channels with our follow caption
                 for ch in channels:
-                    tg_send_document_bytes(safe_pdf_bytes, "official_notification.pdf", telegram_caption, ch)
-                print("🚀 SUCCESS: Root attached PDF Document + Modified caption sent to your channel!")
+                    tg_send_document_bytes(safe_pdf_bytes, "official_circular.pdf", telegram_caption, ch)
+                print("🚀 SUCCESS: Authentic PDF Document + Follow Links sent to your channels!")
             except Exception as e:
-                print(f"❌ PDF routing failed: {e}. Falling back to image/text.")
-                pdf_url = None 
+                print(f"❌ PDF processing crashed: {e}. Switching to media fallback.")
+                pdf_content_bytes = None
 
-        # Fallback logic agar message ke sath direct PDF attached nahi tha
-        if not pdf_url:
+        # Fallback logic agar post mein direct PDF nahi tha
+        if not pdf_content_bytes:
             if latest_item["enclosure_url"]:
                 try:
                     img = requests.get(latest_item["enclosure_url"], timeout=180)
                     for ch in channels:
                         tg_send_photo_bytes(img.content, telegram_caption, ch)
-                    print("📢 Photo + Caption forwarded successfully!")
+                    print("📢 Photo + Follow Links caption forwarded successfully!")
                 except Exception as e:
-                    print(f"⚠️ Photo fallback text routing triggered: {e}")
+                    print(f"⚠️ Media fallback triggered text layout: {e}")
                     for ch in channels:
                         tg_send_text(telegram_caption, ch)
             else:
                 for ch in channels:
                     tg_send_text(telegram_caption, ch)
-                print("📢 Pure Text forwarded successfully!")
+                print("📢 Pure Text + Follow Links forwarded successfully!")
         
-        print(f"🚀 TASK COMPLETION: Saved state to database memory.")
+        print(f"🚀 TASK COMPLETION: Saved state.")
         write_last(latest_item["guid"])
     else:
         print("❌ Workflow stopped due to WordPress error.")
