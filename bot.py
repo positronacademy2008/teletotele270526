@@ -118,6 +118,7 @@ def fetch_telegram_channel_messages():
     soup = BeautifulSoup(resp.text, 'html.parser')
     
     items = []
+    # HTML parses from Top (Oldest) to Bottom (Newest)
     for block in soup.find_all('div', class_='tgme_widget_message'):
         guid = block.get('data-post')
         text_block = block.find('div', class_='tgme_widget_message_text')
@@ -172,7 +173,7 @@ def publish_to_wordpress(title, content):
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
     
     # 🔥 SUPER SHORT URL SLUG
-    clean_slug = f"post-{int(time.time())}"
+    clean_slug = f"post-{int(time.time() * 1000)}"
     
     data = {'title': title, 'content': content, 'status': 'publish', 'slug': clean_slug}
 
@@ -193,19 +194,30 @@ def main():
     items = fetch_telegram_channel_messages()
     if not items: return
 
-    # 🔥 BATCH PROCESSING: Chhoote hue sabhi messages nikalna
+    print(f"🔍 Total messages fetched from channel: {len(items)}")
+
+    # 🔥 BATCH LOGIC FIXED: Ab logic oldest (index 0) se newest ki taraf kaam karega
     new_items = []
-    for it in items:
-        if last_guid and it["guid"] == last_guid:
-            break
-        new_items.append(it)
+    if not last_guid:
+        print("📝 last.txt is empty! Processing ALL available messages from Oldest to Newest.")
+        new_items = items
+    else:
+        found_idx = -1
+        for i, it in enumerate(items):
+            if it["guid"] == last_guid:
+                found_idx = i
+                break
+        
+        if found_idx != -1:
+            new_items = items[found_idx + 1 :]
+        else:
+            print("⚠️ last_guid not found (maybe too old). Processing ALL available messages.")
+            new_items = items
 
     if not new_items:
         print("✅ System is Up To Date. No new messages.")
         return
 
-    # Oldest se Newest sequence maintain karna
-    new_items.reverse()
     print(f"📥 Found {len(new_items)} pending messages to process!")
 
     for current_item in new_items:
