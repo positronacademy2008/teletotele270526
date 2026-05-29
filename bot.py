@@ -82,7 +82,6 @@ def fix_usernames(match):
 def brand_replacer(text: str) -> str:
     if not text: return ""
     text = text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
-    # DO NOT replace indianaukrihelp here globally anymore, handled strictly to avoid 404s
     text = re.sub(r'@(?!RAJASTHAN_TODAY|KAPILRJ06)[A-Za-z0-9_]+', fix_usernames, text)
     text = re.sub(r'https?://(www\.)?(t\.me|telegram\.me)/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://(www\.)?whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
@@ -219,7 +218,7 @@ def publish_to_wordpress(title, content):
     page_api_url = WP_URL.replace("/posts", "/pages")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json',
         'Content-Type': 'application/json'
     }
@@ -344,4 +343,45 @@ def main():
                 # Cleaning stray ellipses
                 clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
                 
-                # 🔥 STRICT TG CAPTION CLEANUP (
+                # 🔥 STRICT TG CAPTION CLEANUP
+                clean_caption = re.sub(r'https?://(?:www\.)?positronacademy\.in[^\s<>"]*', '', clean_caption)
+                
+                lines = [l.strip() for l in clean_caption.split('\n') if l.strip()]
+                if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]): 
+                    lines.pop(0)
+                clean_caption = '\n\n'.join(lines).strip()
+
+                telegram_caption = (
+                    f"{clean_caption}\n\n"
+                    f"🌐 {new_wp_link}\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"{FOLLOW_LINE_TG}\n"
+                    f"{FOLLOW_LINE_WA}"
+                ).strip()
+
+                if current_item["enclosure_url"] and ctype == "application/pdf":
+                    try:
+                        pdf = requests.get(current_item["enclosure_url"], timeout=300, verify=False)
+                        safe_pdf = sanitize_pdf_remove_links(pdf.content)
+                        for ch in channels: tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
+                    except:
+                        for ch in channels: tg_send_text(telegram_caption, ch)
+                elif current_item["enclosure_url"] and ctype.startswith("image/"):
+                    try:
+                        img = requests.get(current_item["enclosure_url"], timeout=180, verify=False)
+                        for ch in channels: tg_send_photo_bytes(img.content, telegram_caption, ch)
+                    except:
+                        for ch in channels: tg_send_text(telegram_caption, ch)
+                else:
+                    for ch in channels: tg_send_text(telegram_caption, ch)
+
+                write_last(current_item["guid"])
+            else:
+                print("   ↳ ❌ [DEBUG] WordPress failed. Skipping.")
+        except Exception as e:
+            print(f"   ↳ ❌ [CRITICAL] Loop error: {e}")
+        
+        time.sleep(3)
+
+if __name__ == "__main__":
+    main()
