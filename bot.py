@@ -2,6 +2,8 @@ import os, re, html, time, io, requests, urllib3, pikepdf, builtins
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from openai import OpenAI
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # 🔥 LIVE LOG FLUSHER
 def print(*args, **kwargs):
@@ -11,7 +13,7 @@ def print(*args, **kwargs):
 # 🛡️ Disable SSL Warnings
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-404, ULTRA-BROWSER SPOOFING & HTML MIRRORING MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-HANG, FAST-TIMEOUT & HTML MIRRORING MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -36,25 +38,32 @@ except Exception as e:
 
 URL_RE = re.compile(r"""(?ix)\b(https?://[^\s<>"]+)\b""")
 
+# 🔥 SMART REQUESTS SESSION (To prevent Hangs & Timeouts)
+session = requests.Session()
+retry = Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retry)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
+
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
     print(f"   ↳ 🛠 [DEBUG] Dispatching TEXT to {channel}...")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": channel, "text": text[:3900], "disable_web_page_preview": False}, timeout=60).raise_for_status()
+    session.post(url, json={"chat_id": channel, "text": text[:3900], "disable_web_page_preview": False}, timeout=15).raise_for_status()
 
 def tg_send_photo_bytes(photo_bytes: bytes, caption: str, channel: str):
     print(f"   ↳ 🛠 [DEBUG] Dispatching PHOTO to {channel}...")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.jpg", photo_bytes)}
     data = {"chat_id": channel, "caption": caption[:900]}
-    requests.post(url, data=data, files=files, timeout=180).raise_for_status()
+    session.post(url, data=data, files=files, timeout=40).raise_for_status()
 
 def tg_send_document_bytes(doc_bytes: bytes, filename: str, caption: str, channel: str):
     print(f"   ↳ 🛠 [DEBUG] Dispatching PDF/DOCUMENT to {channel}...")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     files = {"document": (filename, doc_bytes, "application/pdf")}
     data = {"chat_id": channel, "caption": caption[:900]}
-    requests.post(url, data=data, files=files, timeout=300).raise_for_status()
+    session.post(url, data=data, files=files, timeout=60).raise_for_status()
 
 # --- UTILITIES ---
 def read_last():
@@ -211,27 +220,17 @@ def rewrite_html_page(html_content: str) -> str:
         print(f"   ↳ ❌ [DEBUG ERROR] AI HTML Failed/Timed out: {e}")
         return html_content
 
-# --- WORDPRESS PUBLISHER (WITH ULTRA-BROWSER SPOOFING) ---
+# --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
-    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE (Browser Mode)...")
+    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
     final_content = make_links_clickable(content)
     page_api_url = WP_URL.replace("/posts", "/pages")
     
-    # 🔥 ULTRA-REALISTIC BROWSER HEADERS (Anti-Bot Bypass)
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-        'Content-Type': 'application/json',
-        'Connection': 'keep-alive',
-        'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin'
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
     }
-    
     data = {
         'title': brand_replacer(title), 
         'content': final_content, 
@@ -240,20 +239,21 @@ def publish_to_wordpress(title, content):
     }
     
     try:
-        response = requests.post(page_api_url, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=60, verify=False)
+        # 🔥 REDUCED TIMEOUT TO 20 SECONDS TO PREVENT HANGS
+        response = session.post(page_api_url, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=20, verify=False)
         if response.status_code in [200, 201]: 
             return response.json().get("link", "")
         else:
-            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}. Details: {response.text[:200]}")
+            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}")
     except Exception as e: 
-        print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
+        print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed or Timed Out (Check Hostinger IP Block): {e}")
     return None
 
 # --- DEEP SCRAPER & COPYRIGHT FREE HTML MIRRORING ---
 def deep_scrape_and_mirror(url):
     print(f"   ↳ 🕵️ [DEBUG] Mirroring Competitor URL: {url}")
     try:
-        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20, verify=False)
+        r = session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15, verify=False)
         if r.status_code != 200: return None
         
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -294,8 +294,8 @@ def main():
 
     print(f"🛠 [DEBUG] STEP 2: Fetching RSS from {FEED_URL}")
     try:
-        xml_resp = requests.get(FEED_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=45)
-        items = parse_all_items(xml_resp.text)
+        xml_resp = session.get(FEED_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20).text
+        items = parse_all_items(xml_resp)
     except Exception as e: 
         print(f"❌ [CRITICAL ERROR] Failed to fetch RSS: {e}")
         return
@@ -335,10 +335,8 @@ def main():
                 if "indianaukrihelp.com" in url:
                     new_mirrored_link = deep_scrape_and_mirror(url)
                     if new_mirrored_link:
-                        # SUCCESS: Replace old URL with our working sub-page URL
                         raw_text = raw_text.replace(url, new_mirrored_link)
                     else:
-                        # FAIL: Delete the broken link from text completely so it doesn't cause 404
                         raw_text = raw_text.replace(url, "")
 
             wp_content = rewrite_telegram_post(raw_text)
@@ -350,7 +348,6 @@ def main():
             
             if new_wp_link:
                 print("   ↳ 🛠 [DEBUG] Formatting Final Telegram Caption...")
-                # Cleaning stray ellipses
                 clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
                 
                 # 🔥 STRICT TG CAPTION CLEANUP
@@ -371,14 +368,14 @@ def main():
 
                 if current_item["enclosure_url"] and ctype == "application/pdf":
                     try:
-                        pdf = requests.get(current_item["enclosure_url"], timeout=300, verify=False)
+                        pdf = session.get(current_item["enclosure_url"], timeout=40, verify=False)
                         safe_pdf = sanitize_pdf_remove_links(pdf.content)
                         for ch in channels: tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
                     except:
                         for ch in channels: tg_send_text(telegram_caption, ch)
                 elif current_item["enclosure_url"] and ctype.startswith("image/"):
                     try:
-                        img = requests.get(current_item["enclosure_url"], timeout=180, verify=False)
+                        img = session.get(current_item["enclosure_url"], timeout=40, verify=False)
                         for ch in channels: tg_send_photo_bytes(img.content, telegram_caption, ch)
                     except:
                         for ch in channels: tg_send_text(telegram_caption, ch)
@@ -387,7 +384,7 @@ def main():
 
                 write_last(current_item["guid"])
             else:
-                print("   ↳ ❌ [DEBUG] WordPress failed. Skipping.")
+                print("   ↳ ❌ [DEBUG] WordPress failed. Skipping to next.")
         except Exception as e:
             print(f"   ↳ ❌ [CRITICAL] Loop error: {e}")
         
