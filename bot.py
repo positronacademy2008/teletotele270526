@@ -5,7 +5,7 @@ from openai import OpenAI
 # 🛡️ Disable SSL Warnings (Firewall bypass ke liye zaroori)
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION & PAGE BUILDER MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION, COPYRIGHT-FREE MIRRORING & CLICKABLE LINKS MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -29,13 +29,12 @@ except Exception as e:
     print(f"❌ [CRITICAL ERROR] Missing Environment Variables: {e}")
     exit(1)
 
-URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
-
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
     print(f"   ↳ 🛠 [DEBUG] Dispatching TEXT to {channel}...")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": channel, "text": text[:3900], "disable_web_page_preview": True}, timeout=60).raise_for_status()
+    # disable_web_page_preview ko False kar diya taaki zarurat padne par preview dikhe
+    requests.post(url, json={"chat_id": channel, "text": text[:3900], "disable_web_page_preview": False}, timeout=60).raise_for_status()
 
 def tg_send_photo_bytes(photo_bytes: bytes, caption: str, channel: str):
     print(f"   ↳ 🛠 [DEBUG] Dispatching PHOTO to {channel}...")
@@ -67,27 +66,21 @@ def strip_tags(s: str) -> str:
     s = re.sub(r"<.*?>", "", s)
     return re.sub(r"\n{3,}", "\n\n", s).strip()
 
-def remove_links(s: str) -> str:
-    s = URL_RE.sub("", s)
-    s = re.sub(r"\(\s*\)", "", s)
-    s = re.sub(r"\[\s*\]", "", s)
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
-
 def remove_prefixes(s: str) -> str:
     return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
 
+# 🔥 BRAND REPLACER (Only replaces competitor names and usernames)
 def fix_usernames(match):
     uname = match.group(0)
     if uname.lower() == "@shikshavibhag":
         return "@RAJASTHAN_TODAY"
     return "@KAPILRJ06"
 
-# 🔥 RULE 2 & 4: Aggressive Brand Replacer
 def brand_replacer(text: str) -> str:
     if not text: return ""
     text = text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
-    text = text.replace("indianaukrihelp.com", "positronacademy.in")
     text = re.sub(r'@(?!RAJASTHAN_TODAY|KAPILRJ06)[A-Za-z0-9_]+', fix_usernames, text)
+    # Telegram and WhatsApp links replacement
     text = re.sub(r'https?://(www\.)?(t\.me|telegram\.me)/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://(www\.)?whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
     return text
@@ -150,11 +143,17 @@ def parse_all_items(xml_data: str):
         print(f"❌ [CRITICAL ERROR] Failed to parse RSS securely: {e}")
     return items
 
-# --- GROQ AI & WORDPRESS (PAGE BUILDER) ---
+# --- GROQ AI REWRITER ---
 def rewrite_with_groq(source_content: str) -> str:
     print("   ↳ ⏳ [DEBUG] Sending content to Groq AI for rewriting...")
-    system_prompt = "You are an expert SEO blog writer for Positron Academy. Rewrite the text into a detailed, unique article in Hinglish. VERY IMPORTANT: Convert important URLs into clickable HTML buttons or anchor tags logically in the article. Do NOT include any references to 'indianaukrihelp.com' or 'शिक्षा विभाग समाचार राजस्थान'."
-    user_prompt = "Create a detailed website article:\n\n" + source_content[:3000]
+    system_prompt = (
+        "You are an expert SEO blog writer for Positron Academy. "
+        "Rewrite the text into a detailed, unique, and copyright-free article in Hinglish. "
+        "VERY IMPORTANT: Convert EVERY web address (URL) present in the text into a properly formatted, clickable HTML anchor tag (e.g., <a href='URL' target='_blank'>Click Here</a>). "
+        "Never leave any URL as plain text. "
+        "Do NOT include any references to 'indianaukrihelp.com' or 'शिक्षा विभाग समाचार राजस्थान'."
+    )
+    user_prompt = f"Create a detailed website article:\n\n{source_content[:3500]}"
     
     try:
         response = client.chat.completions.create(
@@ -171,12 +170,11 @@ def rewrite_with_groq(source_content: str) -> str:
         print(f"   ↳ ❌ [DEBUG ERROR] Groq AI Failed: {e}")
         return source_content
 
+# --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
     print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
     
-    final_clean_content = brand_replacer(content)
-    
-    # 🔥 POST ki jagah PAGE endpoint banane ka auto-converter
+    # Send content to Pages endpoint
     page_api_url = WP_URL.replace("/posts", "/pages")
     
     # 🔥 JSON HEADERS FOR FIREWALL BYPASS
@@ -186,12 +184,11 @@ def publish_to_wordpress(title, content):
         'Content-Type': 'application/json',
         'Connection': 'keep-alive'
     }
-    clean_slug = f"update-{int(time.time() * 1000)}"
     
-    # Data is sent as JSON
+    clean_slug = f"update-{int(time.time() * 1000)}"
     data = {
         'title': brand_replacer(title), 
-        'content': final_clean_content, 
+        'content': content, 
         'status': 'publish', 
         'slug': clean_slug
     }
@@ -208,9 +205,9 @@ def publish_to_wordpress(title, content):
         print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
     return None
 
-# --- DEEP SCRAPER & SUB-PAGE MIRRORING ---
+# --- ISSUE 2 FIX: DEEP SCRAPER & COPYRIGHT FREE MIRRORING ---
 def deep_scrape_and_mirror(url):
-    print(f"   ↳ 🕵️ [DEBUG] Mirroring Competitor URL: {url}")
+    print(f"   ↳ 🕵️ [DEBUG] Mirroring & Rewriting Competitor URL: {url}")
     try:
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20, verify=False)
         if r.status_code != 200: return url
@@ -225,14 +222,19 @@ def deep_scrape_and_mirror(url):
         
         if not article: return url
         
-        page_html = str(article)
+        # Scrape plain text
+        page_text = article.get_text(separator="\n").strip()
         page_title = soup.title.string.strip() if soup.title else "Update Details"
         
+        print(f"   ↳ ⏳ [DEBUG] Rewriting mirrored content with Groq AI to make it Copyright-Free...")
+        # Make content copyright free using Groq AI
+        rewritten_html = rewrite_with_groq(page_text)
+        
         print(f"   ↳ ⏳ [DEBUG] Creating sub-PAGE for mirrored content...")
-        mirrored_link = publish_to_wordpress(f"Details: {page_title[:40]}", page_html)
+        mirrored_link = publish_to_wordpress(f"Details: {page_title[:40]}", rewritten_html)
         
         if mirrored_link:
-            print(f"   ↳ ✅ [DEBUG] Successfully mirrored as PAGE! New URL: {mirrored_link}")
+            print(f"   ↳ ✅ [DEBUG] Successfully mirrored and rewritten! New URL: {mirrored_link}")
             return mirrored_link
     except Exception as e:
         print(f"   ↳ ⚠️ [DEBUG] Deep mirroring failed: {e}")
@@ -295,51 +297,17 @@ def main():
                 current_item["enclosure_url"] = None
                 ctype = "" 
 
-            # Link Scanning & Deep Mirroring
-            found_links = URL_RE.findall(raw_text)
-            webpage_scraped_data = raw_text 
-            
-            if found_links:
-                primary_link = found_links[0]
-                
-                # Intercept Competitor Links
-                if "indianaukrihelp.com" in primary_link:
-                    new_mirrored_link = deep_scrape_and_mirror(primary_link)
-                    raw_text = raw_text.replace(primary_link, new_mirrored_link)
-                    webpage_scraped_data = raw_text
-                    primary_link = new_mirrored_link
-                
-                # Standard web scraping for normal links
-                if not primary_link.startswith("https://t.me/") and "positronacademy.in" not in primary_link:
-                    print(f"   ↳ 🌐 [DEBUG] Valid Link found. Scraping: {primary_link}")
-                    try:
-                        resp = requests.get(primary_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=25, verify=False)
-                        if resp.status_code == 200:
-                            soup = BeautifulSoup(resp.text, 'html.parser')
-                            for a in soup.find_all('a', href=True):
-                                href = a['href']
-                                anchor_text = a.get_text(strip=True) or "Link"
-                                
-                                if "indianaukrihelp.com" in href:
-                                    mirrored_href = deep_scrape_and_mirror(href)
-                                    a.replace_with(f"{anchor_text} (Link: {mirrored_href})")
-                                elif href.startswith("http") and not href.startswith("https://t.me/"):
-                                    a.replace_with(f"{anchor_text} (Link: {href})")
-                                else:
-                                    a.decompose()
-                                    
-                            for element in soup(["script", "style", "nav", "footer", "header"]):
-                                element.extract()
-                                
-                            page_text = soup.get_text(separator="\n")
-                            page_text = brand_replacer(page_text)
-                            lines = (line.strip() for line in page_text.splitlines() if line.strip())
-                            webpage_scraped_data = '\n'.join(lines)[:4000]
-                    except Exception as e: 
-                        print(f"   ↳ ⚠️ [DEBUG] Webpage scrape failed: {e}")
+            # Link Scanning & Copyright-Free Deep Mirroring (Only for indianaukrihelp)
+            found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
+            for url in set(found_urls):
+                if "indianaukrihelp.com" in url:
+                    # Mirror & Rewrite competitor link
+                    new_mirrored_link = deep_scrape_and_mirror(url)
+                    raw_text = raw_text.replace(url, new_mirrored_link)
+                # Any other official links are left safely alone in raw_text!
 
-            # AI processing
-            wp_content = rewrite_with_groq(webpage_scraped_data)
+            # AI processing for the main post (will make ALL remaining links clickable HTML)
+            wp_content = rewrite_with_groq(raw_text)
             if current_item["enclosure_url"] and ctype.startswith("image/"):
                 wp_content += f'<br><br><img src="{current_item["enclosure_url"]}" style="max-width:100%;">'
 
@@ -347,10 +315,9 @@ def main():
             
             if new_wp_link:
                 print("   ↳ 🛠 [DEBUG] Formatting Final Telegram Caption...")
-                clean_caption = remove_links(raw_text)
                 
-                # Removing double headings and [...]
-                clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', clean_caption)
+                # Removing double headings and [...] without removing links
+                clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
                 lines = [l.strip() for l in clean_caption.split('\n') if l.strip()]
                 if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]): 
                     lines.pop(0)
