@@ -3,7 +3,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from openai import OpenAI
 
-# 🔥 LIVE LOG FLUSHER: Isse GitHub Actions logs ko hang nahi karega, live dikhayega
+# 🔥 LIVE LOG FLUSHER
 def print(*args, **kwargs):
     kwargs['flush'] = True
     builtins.print(*args, **kwargs)
@@ -11,7 +11,7 @@ def print(*args, **kwargs):
 # 🛡️ Disable SSL Warnings
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-FREEZE, BROWSER-SPOOFING & HTML MIRRORING MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-404, BROKEN-LINK REMOVER & HTML MIRRORING MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -30,12 +30,11 @@ try:
         api_key=os.environ.get("GROQ_API_KEY"),
         base_url="https://api.groq.com/openai/v1"
     )
-    print("🛠 [DEBUG] Environment Variables Loaded Successfully.")
 except Exception as e:
     print(f"❌ [CRITICAL ERROR] Missing Environment Variables: {e}")
     exit(1)
 
-URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
+URL_RE = re.compile(r"""(?ix)\b(https?://[^\s<>"]+)\b""")
 
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
@@ -65,7 +64,6 @@ def read_last():
 
 def write_last(val: str):
     open(LAST_FILE, "w", encoding="utf-8").write(val)
-    print(f"   ↳ 🛠 [DEBUG] last.txt updated with ID: {val}")
 
 def strip_tags(s: str) -> str:
     s = html.unescape(s)
@@ -84,7 +82,7 @@ def fix_usernames(match):
 def brand_replacer(text: str) -> str:
     if not text: return ""
     text = text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
-    text = text.replace("indianaukrihelp.com", "positronacademy.in")
+    # DO NOT replace indianaukrihelp here globally anymore, handled strictly to avoid 404s
     text = re.sub(r'@(?!RAJASTHAN_TODAY|KAPILRJ06)[A-Za-z0-9_]+', fix_usernames, text)
     text = re.sub(r'https?://(www\.)?(t\.me|telegram\.me)/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://(www\.)?whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
@@ -94,7 +92,7 @@ def brand_replacer(text: str) -> str:
 def make_links_clickable(html_text: str) -> str:
     if not html_text: return ""
     try:
-        raw_url_re = re.compile(r'(https?://[^\s<>"]+|www\.[^\s<>"]+)')
+        raw_url_re = re.compile(r'(https?://[^\s<>"]+)')
         soup = BeautifulSoup(html_text, 'html.parser')
         
         text_nodes = list(soup.find_all(string=True))
@@ -109,7 +107,7 @@ def make_links_clickable(html_text: str) -> str:
                 text_node.replace_with(new_node)
         return str(soup)
     except Exception as e:
-        print(f"   ↳ ⚠️ [DEBUG] Link clickable error (Skipping): {e}")
+        print(f"   ↳ ⚠️ [DEBUG] Link clickable error: {e}")
         return html_text
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
@@ -167,7 +165,7 @@ def parse_all_items(xml_data: str):
         print(f"❌ [CRITICAL ERROR] Failed to parse RSS securely: {e}")
     return items
 
-# --- GROQ AI REWRITERS (WITH STRICT TIMEOUTS) ---
+# --- GROQ AI REWRITERS ---
 def rewrite_telegram_post(source_content: str) -> str:
     print("   ↳ ⏳ [DEBUG] AI rewriting SHORT Post (Max wait: 45s)...")
     system_prompt = "You are an expert SEO educational blog writer. Rewrite the provided update into a detailed, unique article in Hinglish. Do NOT include any references to 'indianaukrihelp.com'."
@@ -179,7 +177,7 @@ def rewrite_telegram_post(source_content: str) -> str:
             ],
             model="llama-3.1-8b-instant", 
             temperature=0.5,
-            timeout=45.0 # 🔥 ANTI-FREEZE
+            timeout=45.0
         )
         return response.choices[0].message.content
     except Exception as e: 
@@ -194,7 +192,7 @@ def rewrite_html_page(html_content: str) -> str:
         "1. DO NOT modify ANY <img>, <figure>, <table>, <tr>, <td>, or <a> tags.\n"
         "2. Preserve all 'src' and 'href' attributes exactly.\n"
         "3. Only rewrite the plain text between HTML tags.\n"
-        "4. Replace 'indianaukrihelp.com' with 'positronacademy.in'.\n"
+        "4. Remove references to 'indianaukrihelp.com'.\n"
         "5. Return pure HTML without markdown blocks."
     )
     try:
@@ -205,7 +203,7 @@ def rewrite_html_page(html_content: str) -> str:
             ],
             model="llama-3.1-8b-instant", 
             temperature=0.2,
-            timeout=45.0 # 🔥 ANTI-FREEZE
+            timeout=45.0
         )
         res = response.choices[0].message.content
         res = re.sub(r"^```html\s*", "", res, flags=re.I)
@@ -214,44 +212,30 @@ def rewrite_html_page(html_content: str) -> str:
         print(f"   ↳ ❌ [DEBUG ERROR] AI HTML Failed/Timed out: {e}")
         return html_content
 
-# --- WORDPRESS PUBLISHER (WITH ULTRA-BROWSER SPOOFING) ---
+# --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
-    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE (Browser Mode)...")
-    
+    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
     final_content = make_links_clickable(content)
     page_api_url = WP_URL.replace("/posts", "/pages")
     
-    # 🔥 ULTRA-REALISTIC BROWSER HEADERS (ModSecurity / Firewall Bypass)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-        'Content-Type': 'application/json',
-        'Connection': 'keep-alive',
-        'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
     }
-    
-    clean_slug = f"update-{int(time.time() * 1000)}"
     data = {
         'title': brand_replacer(title), 
         'content': final_content, 
         'status': 'publish', 
-        'slug': clean_slug
+        'slug': f"update-{int(time.time() * 1000)}"
     }
     
     try:
         response = requests.post(page_api_url, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=60, verify=False)
         if response.status_code in [200, 201]: 
-            link = response.json().get("link", "")
-            print(f"   ↳ ✅ [DEBUG] WordPress PAGE Created Successfully! Link: {link}")
-            return link
+            return response.json().get("link", "")
         else:
-            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}. Response: {response.text}")
+            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}")
     except Exception as e: 
         print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
     return None
@@ -261,11 +245,10 @@ def deep_scrape_and_mirror(url):
     print(f"   ↳ 🕵️ [DEBUG] Mirroring Competitor URL: {url}")
     try:
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20, verify=False)
-        if r.status_code != 200: return url
+        if r.status_code != 200: return None
         
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Absolute Link Generator for Images/Tables
         for img in soup.find_all('img'):
             if img.get('src'): img['src'] = urljoin(url, img['src'])
             if img.get('data-src'): img['src'] = urljoin(url, img['data-src']) 
@@ -279,7 +262,7 @@ def deep_scrape_and_mirror(url):
         article = soup.find(class_=re.compile("entry-content|post-content|content-area"))
         if not article: article = soup.find("main")
         if not article: article = soup.find("body")
-        if not article: return url
+        if not article: return None
         
         page_html = str(article)
         page_title = soup.title.string.strip() if soup.title else "Update Details"
@@ -292,7 +275,7 @@ def deep_scrape_and_mirror(url):
             return mirrored_link
     except Exception as e:
         print(f"   ↳ ⚠️ [DEBUG] Deep mirroring failed: {e}")
-    return url 
+    return None 
 
 # --- MAIN CONTROLLER ENGINE ---
 def main():
@@ -337,11 +320,17 @@ def main():
                 current_item["enclosure_url"] = None
                 ctype = "" 
 
-            found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
+            # 🔥 FIX: STRICT URL REPLACEMENT TO AVOID 404s
+            found_urls = URL_RE.findall(raw_text)
             for url in set(found_urls):
                 if "indianaukrihelp.com" in url:
                     new_mirrored_link = deep_scrape_and_mirror(url)
-                    raw_text = raw_text.replace(url, new_mirrored_link)
+                    if new_mirrored_link:
+                        # SUCCESS: Replace old URL with our working sub-page URL
+                        raw_text = raw_text.replace(url, new_mirrored_link)
+                    else:
+                        # FAIL: Delete the broken link from text completely so it doesn't cause 404
+                        raw_text = raw_text.replace(url, "")
 
             wp_content = rewrite_telegram_post(raw_text)
             
@@ -352,43 +341,7 @@ def main():
             
             if new_wp_link:
                 print("   ↳ 🛠 [DEBUG] Formatting Final Telegram Caption...")
+                # Cleaning stray ellipses
                 clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
-                lines = [l.strip() for l in clean_caption.split('\n') if l.strip()]
-                if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]): 
-                    lines.pop(0)
-                clean_caption = '\n\n'.join(lines).strip()
-
-                telegram_caption = (
-                    f"{clean_caption}\n\n"
-                    f"🌐 {new_wp_link}\n\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"{FOLLOW_LINE_TG}\n"
-                    f"{FOLLOW_LINE_WA}"
-                ).strip()
-
-                if current_item["enclosure_url"] and ctype == "application/pdf":
-                    try:
-                        pdf = requests.get(current_item["enclosure_url"], timeout=300, verify=False)
-                        safe_pdf = sanitize_pdf_remove_links(pdf.content)
-                        for ch in channels: tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
-                    except:
-                        for ch in channels: tg_send_text(telegram_caption, ch)
-                elif current_item["enclosure_url"] and ctype.startswith("image/"):
-                    try:
-                        img = requests.get(current_item["enclosure_url"], timeout=180, verify=False)
-                        for ch in channels: tg_send_photo_bytes(img.content, telegram_caption, ch)
-                    except:
-                        for ch in channels: tg_send_text(telegram_caption, ch)
-                else:
-                    for ch in channels: tg_send_text(telegram_caption, ch)
-
-                write_last(current_item["guid"])
-            else:
-                print("   ↳ ❌ [DEBUG] WordPress failed. Skipping.")
-        except Exception as e:
-            print(f"   ↳ ❌ [CRITICAL] Loop error: {e}")
-        
-        time.sleep(3)
-
-if __name__ == "__main__":
-    main()
+                
+                # 🔥 STRICT TG CAPTION CLEANUP (
