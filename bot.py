@@ -11,7 +11,7 @@ def print(*args, **kwargs):
 # 🛡️ Disable SSL Warnings
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-404, BROKEN-LINK REMOVER & HTML MIRRORING MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-404, ULTRA-BROWSER SPOOFING & HTML MIRRORING MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -211,17 +211,27 @@ def rewrite_html_page(html_content: str) -> str:
         print(f"   ↳ ❌ [DEBUG ERROR] AI HTML Failed/Timed out: {e}")
         return html_content
 
-# --- WORDPRESS PUBLISHER ---
+# --- WORDPRESS PUBLISHER (WITH ULTRA-BROWSER SPOOFING) ---
 def publish_to_wordpress(title, content):
-    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
+    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE (Browser Mode)...")
     final_content = make_links_clickable(content)
     page_api_url = WP_URL.replace("/posts", "/pages")
     
+    # 🔥 ULTRA-REALISTIC BROWSER HEADERS (Anti-Bot Bypass)
     headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+        'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
     }
+    
     data = {
         'title': brand_replacer(title), 
         'content': final_content, 
@@ -234,7 +244,7 @@ def publish_to_wordpress(title, content):
         if response.status_code in [200, 201]: 
             return response.json().get("link", "")
         else:
-            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}")
+            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}. Details: {response.text[:200]}")
     except Exception as e: 
         print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
     return None
