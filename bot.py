@@ -13,7 +13,7 @@ def print(*args, **kwargs):
 # 🛡️ Disable SSL Warnings
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: ANTI-HANG, FAST-TIMEOUT & HTML MIRRORING MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: SMART EXTRACTOR (IMAGES/TABLES SAFE), ANTI-404 & BROWSER MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -38,7 +38,7 @@ except Exception as e:
 
 URL_RE = re.compile(r"""(?ix)\b(https?://[^\s<>"]+)\b""")
 
-# 🔥 SMART REQUESTS SESSION (To prevent Hangs & Timeouts)
+# 🔥 SMART REQUESTS SESSION
 session = requests.Session()
 retry = Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
@@ -91,12 +91,13 @@ def fix_usernames(match):
 def brand_replacer(text: str) -> str:
     if not text: return ""
     text = text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
+    text = text.replace("Indianaukrihelp.com", "positronacademy.in")
+    text = text.replace("indianaukrihelp.com", "positronacademy.in")
     text = re.sub(r'@(?!RAJASTHAN_TODAY|KAPILRJ06)[A-Za-z0-9_]+', fix_usernames, text)
     text = re.sub(r'https?://(www\.)?(t\.me|telegram\.me)/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://(www\.)?whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
     return text
 
-# 🔥 SAFE CLICKABLE LINKS MAKER
 def make_links_clickable(html_text: str) -> str:
     if not html_text: return ""
     try:
@@ -107,16 +108,13 @@ def make_links_clickable(html_text: str) -> str:
         for text_node in text_nodes:
             if text_node.parent and text_node.parent.name in ['a', 'script', 'style', 'head', 'title', 'button']:
                 continue
-                
             original_text = str(text_node)
             if raw_url_re.search(original_text):
                 new_text = raw_url_re.sub(r'<a href="\1" target="_blank" style="color: blue; text-decoration: underline;">\1</a>', original_text)
                 new_node = BeautifulSoup(new_text, 'html.parser')
                 text_node.replace_with(new_node)
         return str(soup)
-    except Exception as e:
-        print(f"   ↳ ⚠️ [DEBUG] Link clickable error: {e}")
-        return html_text
+    except Exception: return html_text
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
     try:
@@ -170,18 +168,22 @@ def parse_all_items(xml_data: str):
                 "enclosure_type": enc_type
             })
     except Exception as e:
-        print(f"❌ [CRITICAL ERROR] Failed to parse RSS securely: {e}")
+        print(f"❌ [CRITICAL ERROR] Failed to parse RSS: {e}")
     return items
 
-# --- GROQ AI REWRITERS ---
+# --- GROQ AI REWRITER ---
 def rewrite_telegram_post(source_content: str) -> str:
-    print("   ↳ ⏳ [DEBUG] AI rewriting SHORT Post (Max wait: 45s)...")
-    system_prompt = "You are an expert SEO educational blog writer. Rewrite the provided update into a detailed, unique article in Hinglish. Do NOT include any references to 'indianaukrihelp.com'."
+    print("   ↳ ⏳ [DEBUG] AI rewriting Text (Max wait: 45s)...")
+    system_prompt = (
+        "You are an expert SEO educational blog writer. Rewrite the provided update into a detailed, unique article in Hinglish. "
+        "Format the output beautifully using basic HTML tags like <p>, <strong>, <h3>, and <ul> for lists. "
+        "Do NOT include any references to 'indianaukrihelp.com'."
+    )
     try:
         response = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Rewrite this update safely:\n\n{source_content[:3500]}"}
+                {"role": "user", "content": f"Rewrite and format this text:\n\n{source_content[:4000]}"}
             ],
             model="llama-3.1-8b-instant", 
             temperature=0.5,
@@ -189,40 +191,12 @@ def rewrite_telegram_post(source_content: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e: 
-        print(f"   ↳ ❌ [DEBUG ERROR] AI Failed/Timed out: {e}")
+        print(f"   ↳ ❌ [DEBUG ERROR] AI Failed: {e}")
         return source_content
-
-def rewrite_html_page(html_content: str) -> str:
-    print("   ↳ ⏳ [DEBUG] AI rewriting FULL HTML PAGE (Max wait: 45s)...")
-    system_prompt = (
-        "You are an expert HTML editor. Rewrite the text content of the provided HTML into unique Hinglish. "
-        "CRITICAL RULES: \n"
-        "1. DO NOT modify ANY <img>, <figure>, <table>, <tr>, <td>, or <a> tags.\n"
-        "2. Preserve all 'src' and 'href' attributes exactly.\n"
-        "3. Only rewrite the plain text between HTML tags.\n"
-        "4. Remove references to 'indianaukrihelp.com'.\n"
-        "5. Return pure HTML without markdown blocks."
-    )
-    try:
-        response = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Rewrite this HTML safely:\n\n{html_content[:5000]}"}
-            ],
-            model="llama-3.1-8b-instant", 
-            temperature=0.2,
-            timeout=45.0
-        )
-        res = response.choices[0].message.content
-        res = re.sub(r"^```html\s*", "", res, flags=re.I)
-        return re.sub(r"```\s*$", "", res).strip()
-    except Exception as e: 
-        print(f"   ↳ ❌ [DEBUG ERROR] AI HTML Failed/Timed out: {e}")
-        return html_content
 
 # --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
-    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
+    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE (Browser Mode)...")
     final_content = make_links_clickable(content)
     page_api_url = WP_URL.replace("/posts", "/pages")
     
@@ -239,25 +213,25 @@ def publish_to_wordpress(title, content):
     }
     
     try:
-        # 🔥 REDUCED TIMEOUT TO 20 SECONDS TO PREVENT HANGS
         response = session.post(page_api_url, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=20, verify=False)
         if response.status_code in [200, 201]: 
             return response.json().get("link", "")
         else:
             print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}")
     except Exception as e: 
-        print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed or Timed Out (Check Hostinger IP Block): {e}")
+        print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
     return None
 
-# --- DEEP SCRAPER & COPYRIGHT FREE HTML MIRRORING ---
+# --- 🔥 SMART EXTRACTOR & MIRRORING ---
 def deep_scrape_and_mirror(url):
-    print(f"   ↳ 🕵️ [DEBUG] Mirroring Competitor URL: {url}")
+    print(f"   ↳ 🕵️ [DEBUG] Smart Extracting Competitor URL: {url}")
     try:
         r = session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15, verify=False)
         if r.status_code != 200: return None
         
         soup = BeautifulSoup(r.text, 'html.parser')
         
+        # Absolute URLs Fix
         for img in soup.find_all('img'):
             if img.get('src'): img['src'] = urljoin(url, img['src'])
             if img.get('data-src'): img['src'] = urljoin(url, img['data-src']) 
@@ -272,18 +246,57 @@ def deep_scrape_and_mirror(url):
         if not article: article = soup.find("main")
         if not article: article = soup.find("body")
         if not article: return None
-        
-        page_html = str(article)
+
         page_title = soup.title.string.strip() if soup.title else "Update Details"
-        
-        rewritten_html = rewrite_html_page(page_html)
-        mirrored_link = publish_to_wordpress(f"Details: {page_title[:40]}", rewritten_html)
+
+        # 🔥 1. EXTRACT ALL IMAGES SAFELY
+        images_html = ""
+        for img in article.find_all('img'):
+            # Ignore tiny tracking pixels/icons
+            if img.get('width') and str(img.get('width')).isdigit() and int(img.get('width')) < 50:
+                continue
+            images_html += str(img) + "<br><br>"
+            img.extract() # Remove from HTML so AI doesn't see it
+
+        # 🔥 2. EXTRACT ALL TABLES SAFELY
+        tables_html = ""
+        for table in article.find_all('table'):
+            tables_html += str(table) + "<br><br>"
+            table.extract()
+
+        # 🔥 3. EXTRACT ALL OFFICIAL LINKS SAFELY
+        links_html = ""
+        for a in article.find_all('a'):
+            href = a.get('href', '')
+            text = a.get_text(strip=True)
+            if href.startswith('http') and text:
+                links_html += f'<p><a href="{href}" target="_blank" rel="noopener noreferrer" style="display:inline-block; padding:8px 15px; background-color:#007bff; color:white; text-decoration:none; border-radius:5px; font-weight:bold; margin-bottom:5px;">👉 {text}</a></p>'
+            a.extract()
+
+        # 🔥 4. PASS ONLY RAW TEXT TO AI
+        raw_text = article.get_text(separator="\n").strip()
+        rewritten_text = rewrite_telegram_post(raw_text)
+
+        # 🔥 5. REASSEMBLE EVERYTHING PERFECTLY
+        final_assembled_html = f"""
+        {images_html}
+        {rewritten_text}
+        <br><br>
+        <h2>🔗 Important Links & Official Details</h2>
+        {tables_html}
+        {links_html}
+        """
+
+        # Ensure competitor brand name is replaced inside tables and links too!
+        final_assembled_html = brand_replacer(final_assembled_html)
+
+        mirrored_link = publish_to_wordpress(f"Details: {page_title[:40]}", final_assembled_html)
         
         if mirrored_link:
-            print(f"   ↳ ✅ [DEBUG] Successfully mirrored! New URL: {mirrored_link}")
+            print(f"   ↳ ✅ [DEBUG] Successfully extracted and mirrored! New URL: {mirrored_link}")
             return mirrored_link
     except Exception as e:
-        print(f"   ↳ ⚠️ [DEBUG] Deep mirroring failed: {e}")
+        print(f"   ↳ ⚠️ [DEBUG] Smart extraction failed: {e}")
     return None 
 
 # --- MAIN CONTROLLER ENGINE ---
@@ -318,7 +331,6 @@ def main():
             raw_text = current_item['text']
             ctype = (current_item["enclosure_type"] or "").lower()
 
-            # Ad Blocker
             if any(kw in raw_text.lower() for kw in ['t.me/+', 'sponsor', 'paid promo', 'aviator', 'betting', 'casino']):
                 write_last(current_item["guid"])
                 continue
@@ -329,7 +341,6 @@ def main():
                 current_item["enclosure_url"] = None
                 ctype = "" 
 
-            # 🔥 FIX: STRICT URL REPLACEMENT TO AVOID 404s
             found_urls = URL_RE.findall(raw_text)
             for url in set(found_urls):
                 if "indianaukrihelp.com" in url:
@@ -348,16 +359,17 @@ def main():
             
             if new_wp_link:
                 print("   ↳ 🛠 [DEBUG] Formatting Final Telegram Caption...")
-                clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
                 
-                # 🔥 STRICT TG CAPTION CLEANUP
-                clean_caption = re.sub(r'https?://(?:www\.)?positronacademy\.in[^\s<>"]*', '', clean_caption)
+                # 🔥 FIX FOR DOUBLE LINKS: Remove ALL URLs from the raw text for the Telegram caption
+                clean_caption = re.sub(r'https?://\S+', '', raw_text)
+                clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', clean_caption)
                 
                 lines = [l.strip() for l in clean_caption.split('\n') if l.strip()]
                 if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]): 
                     lines.pop(0)
                 clean_caption = '\n\n'.join(lines).strip()
 
+                # Telegram will ONLY have the single final WP link
                 telegram_caption = (
                     f"{clean_caption}\n\n"
                     f"🌐 {new_wp_link}\n\n"
