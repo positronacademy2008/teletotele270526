@@ -1,12 +1,12 @@
 import os, re, html, time, io, requests, urllib3, pikepdf
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin # 🔥 NAYA: Images aur links ko tootne se bachane ke liye
 from openai import OpenAI
 
-# 🛡️ Disable SSL Warnings
+# 🛡️ Disable SSL Warnings (Firewall bypass ke liye zaroori)
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION, IMAGE RETAINER & CLICKABLE LINKS MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: HTML FORMATTING, TABLES & IMAGES MIRRORING MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -25,11 +25,12 @@ try:
         api_key=os.environ.get("GROQ_API_KEY"),
         base_url="https://api.groq.com/openai/v1"
     )
+    print("🛠 [DEBUG] Environment Variables Loaded Successfully.")
 except Exception as e:
     print(f"❌ [CRITICAL ERROR] Missing Environment Variables: {e}")
     exit(1)
 
-URL_RE = re.compile(r"""(?ix)\b(https?://[^\s<>"]+)\b""")
+URL_RE = re.compile(r"""(?ix)\b(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)\b""")
 
 # --- TELEGRAM SENDER FUNCTIONS ---
 def tg_send_text(text: str, channel: str):
@@ -59,6 +60,7 @@ def read_last():
 
 def write_last(val: str):
     open(LAST_FILE, "w", encoding="utf-8").write(val)
+    print(f"   ↳ 🛠 [DEBUG] last.txt updated with ID: {val}")
 
 def strip_tags(s: str) -> str:
     s = html.unescape(s)
@@ -69,22 +71,23 @@ def strip_tags(s: str) -> str:
 def remove_prefixes(s: str) -> str:
     return re.sub(r"^\[(?:Photo|Media)\]\s*", "", s, flags=re.I).strip()
 
+# 🔥 BRAND REPLACER
 def fix_usernames(match):
     uname = match.group(0)
-    if uname.lower() == "@shikshavibhag": return "@RAJASTHAN_TODAY"
+    if uname.lower() == "@shikshavibhag":
+        return "@RAJASTHAN_TODAY"
     return "@KAPILRJ06"
 
-# 🔥 RULE 2 & 4: Aggressive Brand Replacer
 def brand_replacer(text: str) -> str:
     if not text: return ""
     text = text.replace("शिक्षा विभाग समाचार राजस्थान", "राजस्थान न्यूज़ टूडे")
-    text = text.replace("indianaukrihelp.com", "positronacademy.in")
     text = re.sub(r'@(?!RAJASTHAN_TODAY|KAPILRJ06)[A-Za-z0-9_]+', fix_usernames, text)
     text = re.sub(r'https?://(www\.)?(t\.me|telegram\.me)/[A-Za-z0-9_]+', 'https://t.me/RAJASTHAN_TODAY', text)
     text = re.sub(r'https?://(www\.)?whatsapp\.com/channel/[A-Za-z0-9_]+', 'https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q', text)
     return text
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
+    print("   ↳ 🛠 [DEBUG] Sanitizing PDF (Removing clickable links)...")
     try:
         src = pikepdf.Pdf.open(io.BytesIO(pdf_bytes))
         for page in src.pages:
@@ -107,6 +110,7 @@ def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
         src.save(out)
         return out.getvalue()
     except Exception as e: 
+        print(f"   ↳ ❌ [DEBUG] Pikepdf error: {e}")
         return pdf_bytes
 
 # --- RSS PARSER ---
@@ -140,36 +144,44 @@ def parse_all_items(xml_data: str):
         print(f"❌ [CRITICAL ERROR] Failed to parse RSS securely: {e}")
     return items
 
-# --- GROQ AI REWRITER (2 DIFFERENT ENGINES) ---
-def rewrite_telegram_post(source_content: str) -> str:
-    print("   ↳ ⏳ [DEBUG] AI rewriting SHORT Post...")
+# --- GROQ AI REWRITERS ---
+
+def rewrite_with_groq(source_content: str) -> str:
+    """Ye normal telegram text ke liye hai"""
+    print("   ↳ ⏳ [DEBUG] Sending content to Groq AI for rewriting...")
     system_prompt = (
-        "You are a professional educational blog writer. Rewrite the provided update into a detailed, unique article in Hinglish. "
-        "CRITICAL: If there are URLs in the text, you MUST KEEP THEM and convert them into clickable HTML anchor tags (e.g. <a href='URL' target='_blank'>Click Here</a>). "
-        "Do NOT remove any official links."
+        "You are an expert SEO blog writer for Positron Academy. "
+        "Rewrite the text into a detailed, unique, and copyright-free article in Hinglish. "
+        "Convert EVERY web address (URL) present in the text into a clickable HTML anchor tag. "
+        "Do NOT include any references to 'indianaukrihelp.com' or 'शिक्षा विभाग समाचार राजस्थान'."
     )
+    user_prompt = f"Create a detailed website article:\n\n{source_content[:3500]}"
+    
     try:
         response = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Rewrite this update:\n\n{source_content[:3000]}"}
+                {"role": "user", "content": user_prompt}
             ],
-            model="llama-3.1-8b-instant", temperature=0.5
+            model="llama-3.1-8b-instant", 
+            temperature=0.5
         )
         return response.choices[0].message.content
     except Exception as e: 
-        print(f"   ↳ ❌ [DEBUG ERROR] AI Failed: {e}")
+        print(f"   ↳ ❌ [DEBUG ERROR] Groq AI Failed: {e}")
         return source_content
 
 def rewrite_html_page(html_content: str) -> str:
+    """🔥 NAYA AI ENGINE: Ye sirf HTML structure (Tables/Images) preserve karne ke liye hai"""
     print("   ↳ ⏳ [DEBUG] AI rewriting FULL HTML PAGE (Preserving Tables & Images)...")
     system_prompt = (
-        "You are an expert HTML editor. Rewrite the text content of the provided HTML into unique, copyright-free Hinglish. "
+        "You are an expert HTML editor and SEO blog writer. Rewrite the text content of the provided HTML into unique, copyright-free Hinglish. "
         "CRITICAL RULES: \n"
-        "1. DO NOT modify, remove, or break ANY <img>, <table>, <tr>, <td>, or <a> tags.\n"
+        "1. DO NOT modify, remove, or break ANY <img>, <figure>, <table>, <tr>, <td>, or <a> tags.\n"
         "2. Preserve all 'src' and 'href' attributes exactly as they are.\n"
-        "3. Only rewrite the plain text that sits between the HTML tags.\n"
-        "4. Return pure HTML, do not wrap in markdown."
+        "3. Only rewrite the plain text that sits between the HTML tags to make it copyright-free.\n"
+        "4. Replace any remaining references of 'indianaukrihelp.com' with 'positronacademy.in'.\n"
+        "5. Return pure HTML, do not wrap in markdown format like ```html."
     )
     try:
         response = client.chat.completions.create(
@@ -177,7 +189,8 @@ def rewrite_html_page(html_content: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Rewrite this HTML safely:\n\n{html_content[:5000]}"}
             ],
-            model="llama-3.1-8b-instant", temperature=0.3
+            model="llama-3.1-8b-instant", 
+            temperature=0.2 # Temperature kam rakha hai taaki HTML tags na tode
         )
         res = response.choices[0].message.content
         res = re.sub(r"^```html\s*", "", res, flags=re.I)
@@ -188,7 +201,8 @@ def rewrite_html_page(html_content: str) -> str:
 
 # --- WORDPRESS PUBLISHER ---
 def publish_to_wordpress(title, content):
-    print(f"   ↳ ⏳ [DEBUG] Publishing PAGE to WordPress...")
+    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
+    
     page_api_url = WP_URL.replace("/posts", "/pages")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -208,48 +222,54 @@ def publish_to_wordpress(title, content):
     try:
         response = requests.post(page_api_url, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=60, verify=False)
         if response.status_code in [200, 201]: 
-            return response.json().get("link", "")
+            link = response.json().get("link", "")
+            print(f"   ↳ ✅ [DEBUG] WordPress PAGE Created Successfully! Link: {link}")
+            return link
         else:
-            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}")
+            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}. Response: {response.text}")
     except Exception as e: 
         print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
     return None
 
-# --- DEEP SCRAPER & COPYRIGHT FREE MIRRORING ---
+# --- DEEP SCRAPER & COPYRIGHT FREE HTML MIRRORING ---
 def deep_scrape_and_mirror(url):
-    print(f"   ↳ 🕵️ [DEBUG] Mirroring Competitor URL: {url}")
+    print(f"   ↳ 🕵️ [DEBUG] Mirroring & Rewriting Competitor URL: {url}")
     try:
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20, verify=False)
         if r.status_code != 200: return url
         
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Fixing relative Images and Links before extracting! (CRITICAL FIX FOR IMAGES)
+        # 🔥 FIX BROKEN IMAGES & LINKS: Relative links ko Absolute links mein badalna
         for img in soup.find_all('img'):
             if img.get('src'): img['src'] = urljoin(url, img['src'])
-            if img.get('data-src'): img['src'] = urljoin(url, img['data-src']) # For lazy-loaded images
+            if img.get('data-src'): img['src'] = urljoin(url, img['data-src']) # Kai sites data-src use karti hain
+            if img.get('srcset'): del img['srcset'] # Srcset hatana zaroori hai error rokne ke liye
         for a in soup.find_all('a'):
             if a.get('href'): a['href'] = urljoin(url, a['href'])
-        
+            
         for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
             element.extract()
             
         article = soup.find(class_=re.compile("entry-content|post-content|content-area"))
         if not article: article = soup.find("main")
         if not article: article = soup.find("body")
+        
         if not article: return url
         
+        # 🔥 Pura HTML uthana, sirf text nahi!
         page_html = str(article)
         page_title = soup.title.string.strip() if soup.title else "Update Details"
         
-        # Rewriting using HTML specific AI Engine
+        print(f"   ↳ ⏳ [DEBUG] Rewriting mirrored content with Groq AI (Preserving Tables/Images)...")
+        # 🔥 AI se HTML rewrite karwana
         rewritten_html = rewrite_html_page(page_html)
         
         print(f"   ↳ ⏳ [DEBUG] Creating sub-PAGE for mirrored content...")
         mirrored_link = publish_to_wordpress(f"Details: {page_title[:40]}", rewritten_html)
         
         if mirrored_link:
-            print(f"   ↳ ✅ [DEBUG] Mirrored Successfully! New URL: {mirrored_link}")
+            print(f"   ↳ ✅ [DEBUG] Successfully mirrored and rewritten! New URL: {mirrored_link}")
             return mirrored_link
     except Exception as e:
         print(f"   ↳ ⚠️ [DEBUG] Deep mirroring failed: {e}")
@@ -260,15 +280,20 @@ def main():
     print("\n🛠 [DEBUG] STEP 1: Fetching settings.")
     channels = [c.strip() for c in DEST_CHANNELS.split(",") if c.strip()]
     last_guid = read_last()
+    print(f"   ↳ Memory state -> Last GUID: '{last_guid}'")
 
     print(f"🛠 [DEBUG] STEP 2: Fetching RSS from {FEED_URL}")
     try:
         xml_resp = requests.get(FEED_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=45)
         items = parse_all_items(xml_resp.text)
+        print(f"   ↳ ✅ [DEBUG] Parsed {len(items)} items from feed.")
     except Exception as e: 
         print(f"❌ [CRITICAL ERROR] Failed to fetch RSS: {e}")
         return
 
+    if not items: return
+
+    print("🛠 [DEBUG] STEP 3: Calculating pending sequence.")
     new_items = []
     if not last_guid: 
         new_items = items
@@ -282,7 +307,7 @@ def main():
         print("✅ [DEBUG] System Up To Date.")
         return
         
-    new_items.reverse()
+    new_items.reverse() # Process oldest first
     print(f"📥 [DEBUG] Processing {len(new_items)} new messages.")
 
     for current_item in new_items:
@@ -294,35 +319,40 @@ def main():
             # Ad Blocker
             ad_keywords = ['t.me/+', 'sponsor', 'paid promo', 'aviator', 'betting', 'casino']
             if any(kw in raw_text.lower() for kw in ad_keywords):
+                print("   ↳ 🚫 [DEBUG] Promotional Ad detected. Skipping.")
                 write_last(current_item["guid"])
                 continue
 
             # Initial Brand Replacement
             raw_text = brand_replacer(raw_text)
 
-            # Drop competitors attachment
+            # Attachment Dropper for Competitor Keywords
             if "राजस्थान न्यूज़ टूडे" in raw_text:
+                print("   ↳ 🛠 [DEBUG] Competitor keyword found. Dropping PDF/Image.")
                 current_item["enclosure_url"] = None
                 ctype = "" 
 
-            # Only intercept Indianaukrihelp, keep other links safe
-            found_urls = URL_RE.findall(raw_text)
+            # Link Scanning & Copyright-Free Deep Mirroring (Only for indianaukrihelp)
+            found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
             for url in set(found_urls):
                 if "indianaukrihelp.com" in url:
+                    # Mirror & Rewrite competitor link
                     new_mirrored_link = deep_scrape_and_mirror(url)
                     raw_text = raw_text.replace(url, new_mirrored_link)
+                # Any other official links are left safely alone in raw_text!
 
-            # AI processing for the main post
-            wp_content = rewrite_telegram_post(raw_text)
+            # AI processing for the main post (will make ALL remaining links clickable HTML)
+            wp_content = rewrite_with_groq(raw_text)
             if current_item["enclosure_url"] and ctype.startswith("image/"):
                 wp_content += f'<br><br><img src="{current_item["enclosure_url"]}" style="max-width:100%;">'
 
             new_wp_link = publish_to_wordpress(current_item["title"][:50], wp_content)
             
             if new_wp_link:
-                # TELEGRAM CAPTION FORMATTING (Keeping links intact!)
-                clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
+                print("   ↳ 🛠 [DEBUG] Formatting Final Telegram Caption...")
                 
+                # Removing double headings and [...] without removing links
+                clean_caption = re.sub(r'\[\s*\.\.\.\s*\]|…|\.\.\.', '', raw_text)
                 lines = [l.strip() for l in clean_caption.split('\n') if l.strip()]
                 if len(lines) > 1 and (lines[0] in lines[1] or lines[1] in lines[0]): 
                     lines.pop(0)
@@ -341,7 +371,8 @@ def main():
                         pdf = requests.get(current_item["enclosure_url"], timeout=300, verify=False)
                         safe_pdf = sanitize_pdf_remove_links(pdf.content)
                         for ch in channels: tg_send_document_bytes(safe_pdf, "official_circular.pdf", telegram_caption, ch)
-                    except:
+                    except Exception as e:
+                        print(f"   ↳ ❌ [DEBUG] PDF Failed: {e}. Sending text instead.")
                         for ch in channels: tg_send_text(telegram_caption, ch)
                 elif current_item["enclosure_url"] and ctype.startswith("image/"):
                     try:
@@ -353,6 +384,8 @@ def main():
                     for ch in channels: tg_send_text(telegram_caption, ch)
 
                 write_last(current_item["guid"])
+            else:
+                print("   ↳ ❌ [DEBUG] WordPress failed for this item. Proceeding to next.")
         except Exception as e:
             print(f"   ↳ ❌ [CRITICAL] Loop error on item: {e}")
         
