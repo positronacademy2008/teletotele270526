@@ -5,7 +5,7 @@ from openai import OpenAI
 # 🛡️ Disable SSL Warnings (Firewall bypass ke liye zaroori)
 urllib3.disable_warnings()
 
-print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION & DEEP MIRRORING MODE...")
+print("🛠 [DEBUG] SYSTEM BOOTING: BRAND PROTECTION & PAGE BUILDER MODE...")
 
 # --- CONFIGURATION & ENV VARIABLES ---
 try:
@@ -150,7 +150,7 @@ def parse_all_items(xml_data: str):
         print(f"❌ [CRITICAL ERROR] Failed to parse RSS securely: {e}")
     return items
 
-# --- GROQ AI & WORDPRESS ---
+# --- GROQ AI & WORDPRESS (PAGE BUILDER) ---
 def rewrite_with_groq(source_content: str) -> str:
     print("   ↳ ⏳ [DEBUG] Sending content to Groq AI for rewriting...")
     system_prompt = "You are an expert SEO blog writer for Positron Academy. Rewrite the text into a detailed, unique article in Hinglish. VERY IMPORTANT: Convert important URLs into clickable HTML buttons or anchor tags logically in the article. Do NOT include any references to 'indianaukrihelp.com' or 'शिक्षा विभाग समाचार राजस्थान'."
@@ -172,9 +172,12 @@ def rewrite_with_groq(source_content: str) -> str:
         return source_content
 
 def publish_to_wordpress(title, content):
-    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress...")
+    print(f"   ↳ ⏳ [DEBUG] Publishing to WordPress as PAGE...")
     
     final_clean_content = brand_replacer(content)
+    
+    # 🔥 POST ki jagah PAGE endpoint banane ka auto-converter
+    page_api_url = WP_URL.replace("/posts", "/pages")
     
     # 🔥 JSON HEADERS FOR FIREWALL BYPASS
     headers = {
@@ -194,18 +197,18 @@ def publish_to_wordpress(title, content):
     }
     
     try:
-        response = requests.post(WP_URL, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=60, verify=False)
+        response = requests.post(page_api_url, auth=(WP_USER, WP_PASS), json=data, headers=headers, timeout=60, verify=False)
         if response.status_code in [200, 201]: 
             link = response.json().get("link", "")
-            print(f"   ↳ ✅ [DEBUG] WordPress Publish Success! Link: {link}")
+            print(f"   ↳ ✅ [DEBUG] WordPress PAGE Created Successfully! Link: {link}")
             return link
         else:
-            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected post. Status: {response.status_code}. Response: {response.text}")
+            print(f"   ↳ ❌ [DEBUG ERROR] WP rejected PAGE. Status: {response.status_code}. Response: {response.text}")
     except Exception as e: 
         print(f"   ↳ ❌ [CRITICAL ERROR] WordPress request failed: {e}")
     return None
 
-# --- DEEP SCRAPER & SUB-POST MIRRORING ---
+# --- DEEP SCRAPER & SUB-PAGE MIRRORING ---
 def deep_scrape_and_mirror(url):
     print(f"   ↳ 🕵️ [DEBUG] Mirroring Competitor URL: {url}")
     try:
@@ -225,11 +228,11 @@ def deep_scrape_and_mirror(url):
         page_html = str(article)
         page_title = soup.title.string.strip() if soup.title else "Update Details"
         
-        print(f"   ↳ ⏳ [DEBUG] Creating sub-post for mirrored content...")
+        print(f"   ↳ ⏳ [DEBUG] Creating sub-PAGE for mirrored content...")
         mirrored_link = publish_to_wordpress(f"Details: {page_title[:40]}", page_html)
         
         if mirrored_link:
-            print(f"   ↳ ✅ [DEBUG] Successfully mirrored! New URL: {mirrored_link}")
+            print(f"   ↳ ✅ [DEBUG] Successfully mirrored as PAGE! New URL: {mirrored_link}")
             return mirrored_link
     except Exception as e:
         print(f"   ↳ ⚠️ [DEBUG] Deep mirroring failed: {e}")
