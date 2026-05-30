@@ -188,6 +188,9 @@ class Config:
     follow_line_tg: str = ""
     follow_line_wa: str = ""
     wp_post_type: str = "pages"
+    wp_timeout: int = 25
+    wp_max_retries: int = 2
+    wp_referer: str = ""
     groq_model: str = "llama-3.1-8b-instant"
 
     @classmethod
@@ -221,6 +224,9 @@ class Config:
             follow_line_tg=os.environ.get("FOLLOW_LINE_TG", "").strip(),
             follow_line_wa=os.environ.get("FOLLOW_LINE_WA", "").strip(),
             wp_post_type=post_type,
+            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 25, minimum=5),
+            wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 2, minimum=1),
+            wp_referer=os.environ.get("WP_REFERER", "").strip(),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
         )
 
@@ -257,12 +263,13 @@ def build_session(config: Config) -> requests.Session:
         LOGGER.warning("ALLOW_INSECURE_SSL=true; HTTPS certificate verification is disabled.")
 
     retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
+        total=1,
+        connect=1,
+        read=1,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET", "HEAD", "POST", "PUT", "PATCH"}),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        raise_on_status=False,
     )
     session = requests.Session()
     adapter = HTTPAdapter(max_retries=retry)
@@ -282,6 +289,13 @@ def default_headers(referer: str = "") -> dict[str, str]:
     if referer:
         headers["Referer"] = referer
     return headers
+
+
+def origin_from_url(url: str) -> str:
+    parsed = urlparse(url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def make_soup(markup: str, parser: str = "html.parser") -> Any:
@@ -799,19 +813,34 @@ class WordPressClient:
     def endpoint(self, resource: str) -> str:
         return f"{self.api_root()}/{resource.strip('/')}"
 
+    def api_headers(self, headers: dict[str, str] | None = None) -> dict[str, str]:
+        final_headers = {
+            "User-Agent": default_headers()["User-Agent"],
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        origin = origin_from_url(self.config.wp_url)
+        if origin:
+            final_headers["Origin"] = origin
+            final_headers["Referer"] = self.config.wp_referer or f"{origin}/wp-admin/"
+        final_headers.update(headers or {})
+        return final_headers
+
     def request_json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
-        headers = kwargs.pop("headers", {})
-        headers.setdefault("User-Agent", default_headers()["User-Agent"])
-        headers.setdefault("Accept", "application/json")
+        headers = self.api_headers(kwargs.pop("headers", {}))
+        timeout = kwargs.pop("timeout", self.config.wp_timeout)
+        attempts = self.config.wp_max_retries
         last_error = ""
-        for attempt in range(1, 4):
+        for attempt in range(1, attempts + 1):
             try:
                 response = self.session.request(
                     method,
                     url,
                     auth=(self.config.wp_user, self.config.wp_pass),
                     headers=headers,
-                    timeout=kwargs.pop("timeout", 45),
+                    timeout=timeout,
                     verify=self.config.verify_ssl,
                     **kwargs,
                 )
@@ -822,9 +851,9 @@ class WordPressClient:
                     break
             except Exception as exc:
                 last_error = str(exc)
-            sleep_for = min(2 ** attempt, 10)
-            LOGGER.warning("WordPress API attempt %s failed: %s", attempt, last_error)
-            time.sleep(sleep_for)
+            LOGGER.warning("WordPress API attempt %s/%s failed: %s", attempt, attempts, last_error)
+            if attempt < attempts:
+                time.sleep(min(2 ** attempt, 8))
         raise RuntimeError(f"WordPress API failed: {last_error}")
 
     def upload_media_bytes(self, media_bytes: bytes, source_url: str, content_type: str, alt_text: str = "") -> str:
@@ -844,13 +873,18 @@ class WordPressClient:
             self.endpoint("media"),
             headers=headers,
             data=media_bytes,
-            timeout=60,
+            timeout=self.config.wp_timeout,
         )
         media_url = payload.get("source_url") or payload.get("guid", {}).get("rendered", "")
         media_id = payload.get("id")
         if alt_text and media_id:
             try:
-                self.request_json("POST", self.endpoint(f"media/{media_id}"), json={"alt_text": alt_text[:120]}, timeout=20)
+                self.request_json(
+                    "POST",
+                    self.endpoint(f"media/{media_id}"),
+                    json={"alt_text": alt_text[:120]},
+                    timeout=min(self.config.wp_timeout, 20),
+                )
             except Exception as exc:
                 LOGGER.warning("Could not update WordPress media alt text: %s", exc)
         return media_url
@@ -932,7 +966,7 @@ class WordPressClient:
             self.endpoint(self.config.wp_post_type),
             headers={"Content-Type": "application/json"},
             json=data,
-            timeout=60,
+            timeout=self.config.wp_timeout,
         )
         return payload.get("link", "")
 
