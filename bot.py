@@ -62,11 +62,16 @@ SPAM_TEXT_HINTS = (
     "casino",
     "aviator",
     "paid promo",
+    "paid promotion",
     "sponsored",
     "sponsor",
     "prediction game",
     "earn money",
+    "promo code",
+    "refer and earn",
 )
+HARD_SKIP_PHRASES = ("शिक्षा विभाग समाचार",)
+DEFAULT_SOURCE_PAGE_HOSTS = ("indianaukrihelp.com",)
 SPAM_HOST_HINTS = (
     "1xbet",
     "bet365",
@@ -162,6 +167,13 @@ def parse_int(value: str | None, default: int, minimum: int = 0) -> int:
     return max(minimum, parsed)
 
 
+def parse_csv_tuple(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None or value.strip() == "":
+        return default
+    parts = tuple(part.strip() for part in value.split(",") if part.strip())
+    return parts or default
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -191,6 +203,8 @@ class Config:
     wp_timeout: int = 25
     wp_max_retries: int = 2
     wp_referer: str = ""
+    source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
+    skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
 
     @classmethod
@@ -221,12 +235,14 @@ class Config:
             max_retries=parse_int(os.environ.get("MAX_RETRIES"), 3, minimum=0),
             allow_insecure_ssl=parse_bool(os.environ.get("ALLOW_INSECURE_SSL"), False),
             dry_run=parse_bool(os.environ.get("DRY_RUN"), False),
-            follow_line_tg=os.environ.get("FOLLOW_LINE_TG", "").strip(),
+            follow_line_tg=os.environ.get("FOLLOW_LINE_TG", os.environ.get("FOLLOW_LINE", "")).strip(),
             follow_line_wa=os.environ.get("FOLLOW_LINE_WA", "").strip(),
             wp_post_type=post_type,
             wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 25, minimum=5),
             wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 2, minimum=1),
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
+            source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
+            skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
         )
 
@@ -311,6 +327,10 @@ def clean_url(raw_url: str) -> str:
     return (raw_url or "").strip().rstrip(TRAILING_URL_PUNCT)
 
 
+def canonical_url(url: str) -> str:
+    return clean_url(url).split("#", 1)[0].rstrip("/")
+
+
 def safe_url(raw_url: str | None, base_url: str = "") -> str:
     if not raw_url:
         return ""
@@ -332,6 +352,22 @@ def extract_urls(text: str) -> list[str]:
     return urls
 
 
+def host_matches(url: str, hosts: Iterable[str]) -> bool:
+    parsed = urlparse(url or "")
+    hostname = (parsed.netloc or parsed.path.split("/", 1)[0]).lower()
+    hostname = hostname.split("@")[-1].split(":", 1)[0].removeprefix("www.")
+    for raw_host in hosts:
+        host = (raw_host or "").strip().lower()
+        if not host:
+            continue
+        if "://" in host:
+            host = urlparse(host).netloc.lower()
+        host = host.split("/", 1)[0].split(":", 1)[0].removeprefix("www.")
+        if hostname == host or hostname.endswith("." + host):
+            return True
+    return False
+
+
 def is_spam_url(url: str) -> bool:
     lower = (url or "").lower()
     if any(pattern in lower for pattern in SUSPICIOUS_INVITE_PATTERNS):
@@ -343,6 +379,52 @@ def is_spam_url(url: str) -> bool:
 def line_has_spam(text: str) -> bool:
     lower = (text or "").lower()
     return any(hint in lower for hint in SPAM_TEXT_HINTS) or any(pattern in lower for pattern in SUSPICIOUS_INVITE_PATTERNS)
+
+
+def message_has_skip_phrase(item: FeedItem, phrases: Iterable[str]) -> str:
+    haystack = normalize_whitespace(
+        "\n".join([item.title or "", item.text or "", strip_tags(item.html_content or "")])
+    )
+    for phrase in phrases:
+        if phrase and phrase in haystack:
+            return phrase
+    return ""
+
+
+def looks_like_ad_message(text: str) -> bool:
+    clean = normalize_whitespace(text or "")
+    if not clean:
+        return False
+    lower = clean.lower()
+    if any(hint in lower for hint in ("betting", "casino", "aviator", "paid promo", "paid promotion")):
+        return True
+
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    if not lines:
+        return False
+    spam_lines = [line for line in lines if line_has_spam(line) or any(is_spam_url(url) for url in extract_urls(line))]
+    if not spam_lines:
+        return False
+
+    useful_terms = (
+        "result",
+        "admit card",
+        "vacancy",
+        "recruitment",
+        "exam",
+        "notification",
+        "apply",
+        "date",
+        "fee",
+        "eligibility",
+        "deadline",
+        "रिजल्ट",
+        "भर्ती",
+        "परीक्षा",
+        "आवेदन",
+    )
+    useful_hits = sum(1 for term in useful_terms if term in lower)
+    return len(spam_lines) / max(len(lines), 1) >= 0.5 and useful_hits == 0
 
 
 def strip_tags(value: str) -> str:
@@ -590,6 +672,37 @@ def extract_important_links(markup: str, base_url: str = "", extra_urls: Iterabl
         if url and not is_spam_url(url):
             links.append(LinkInfo(label=urlparse(url).netloc or "Source", href=url))
     return dedupe_links((link for link in links if is_important_link(link.label, link.href)), limit=24)
+
+
+def apply_link_replacements_text(text: str, replacements: dict[str, str]) -> str:
+    if not text or not replacements:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        url = clean_url(match.group(1))
+        return replacements.get(canonical_url(url), url)
+
+    return URL_RE.sub(replace, text)
+
+
+def apply_link_replacements_html(markup: str, replacements: dict[str, str], base_url: str = "") -> str:
+    if not markup or not replacements:
+        return markup
+    soup = make_soup(markup, "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = safe_url(link.get("href"), base_url)
+        replacement = replacements.get(canonical_url(href))
+        if replacement:
+            link["href"] = replacement
+    for text_node in list(soup.find_all(string=True)):
+        parent_name = getattr(text_node.parent, "name", "")
+        if parent_name in {"a", "script", "style", "textarea"}:
+            continue
+        original = str(text_node)
+        replaced = apply_link_replacements_text(original, replacements)
+        if replaced != original:
+            text_node.replace_with(replaced)
+    return str(soup)
 
 
 def important_links_block(links: list[LinkInfo]) -> str:
@@ -1220,6 +1333,22 @@ def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: lis
     return "\n".join(piece for piece in pieces if piece)
 
 
+def build_source_page_content(
+    title: str,
+    source_url: str,
+    source_html: str,
+    fallback_text: str,
+    ai: AIRewriter,
+    important_links: list[LinkInfo],
+) -> str:
+    raw_html = source_html or text_to_html(fallback_text)
+    cleaned_html = sanitize_html_content(raw_html, source_url)
+    cleaned_html = add_digest_heading(cleaned_html, title)
+    cleaned_html = ai.rewrite_html(cleaned_html)
+    pieces = [cleaned_html, source_block(source_url), important_links_block(important_links)]
+    return "\n".join(piece for piece in pieces if piece)
+
+
 def add_digest_heading(content_html: str, title: str) -> str:
     escaped_title = html.escape(title)
     return f"<h1>{escaped_title}</h1>\n{content_html}"
@@ -1380,6 +1509,16 @@ class MirrorBot:
         LOGGER.info("Processing item: %s", item.title[:100])
         try:
             item.text = remove_spam_urls_from_text(item.text)
+            skip_phrase = message_has_skip_phrase(item, self.config.skip_message_phrases)
+            if skip_phrase:
+                reason = f"Blocked phrase present: {skip_phrase}"
+                self.state.mark_skipped(item.guid, reason)
+                LOGGER.info("Item skipped: %s", reason)
+                return
+            if looks_like_ad_message(item.text):
+                self.state.mark_skipped(item.guid, "Advertisement/promotional message")
+                LOGGER.info("Item skipped as advertisement/promotional message: %s", item.title[:80])
+                return
             if not item.text and not item.html_content:
                 self.state.mark_skipped(item.guid, "No useful content after spam cleanup")
                 LOGGER.warning("Item skipped after cleanup: %s", item.title[:80])
@@ -1397,6 +1536,20 @@ class MirrorBot:
 
             row = self.state.get(item.guid)
             wp_link = row["wp_link"] if row and row["wp_link"] else ""
+
+            source_replacements = self.create_source_pages(
+                item,
+                existing_wp_link=wp_link,
+                initial_source_html=source_page_html,
+                initial_page_links=page_links,
+            )
+            if source_replacements:
+                item.text = apply_link_replacements_text(item.text, source_replacements)
+                item.html_content = apply_link_replacements_html(item.html_content, source_replacements, item.source_url)
+                wp_link = wp_link or next(iter(source_replacements.values()))
+                if wp_link:
+                    self.state.set_wp_link(item.guid, wp_link)
+
             if self.wordpress.ready and not wp_link:
                 wp_content = build_wordpress_content(item, self.ai, important_links)
                 wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
@@ -1409,13 +1562,73 @@ class MirrorBot:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])
                 return
 
-            self.dispatch_telegram(item, wp_link, important_links)
+            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
+            self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
             self.state.mark_published(item.guid, wp_link)
             LOGGER.info("Published item: %s", item.title[:100])
         except Exception as exc:
             error = str(exc)
             self.state.mark_failed(item.guid, error)
             LOGGER.error("Item failed: %s | %s", item.title[:100], error)
+
+    def source_page_urls_from_item(self, item: FeedItem) -> list[str]:
+        urls = [item.source_url, *extract_urls(item.text), *extract_urls(strip_tags(item.html_content))]
+        output: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            url = safe_url(url, item.source_url or self.config.feed_url)
+            if not url or not host_matches(url, self.config.source_page_hosts):
+                continue
+            key = canonical_url(url)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(url)
+        return output
+
+    def create_source_pages(
+        self,
+        item: FeedItem,
+        existing_wp_link: str = "",
+        initial_source_html: str = "",
+        initial_page_links: list[LinkInfo] | None = None,
+    ) -> dict[str, str]:
+        source_urls = self.source_page_urls_from_item(item)
+        if not source_urls:
+            return {}
+        if not self.wordpress.ready:
+            raise RuntimeError("WordPress credentials are required to replace source-page links")
+        if existing_wp_link and len(source_urls) == 1:
+            return {canonical_url(source_urls[0]): existing_wp_link}
+
+        replacements: dict[str, str] = {}
+        for source_url in source_urls:
+            LOGGER.info("Creating transparent source page for %s", source_url)
+            if canonical_url(source_url) == canonical_url(item.source_url):
+                source_html = initial_source_html
+                page_links = initial_page_links or []
+            else:
+                source_html, page_links = self.fetch_source_context(source_url)
+            important_links = dedupe_links(
+                [
+                    *extract_important_links(source_html, source_url),
+                    *extract_important_links(item.html_content or item.text, item.source_url),
+                    *page_links,
+                ],
+                limit=24,
+            )
+            content = build_source_page_content(item.title, source_url, source_html, item.text, self.ai, important_links)
+            wp_link = self.wordpress.publish(item.title, content, source_url)
+            if not wp_link and not self.config.dry_run:
+                raise RuntimeError(f"WordPress did not return a link for source page: {source_url}")
+            if wp_link:
+                replacements[canonical_url(source_url)] = wp_link
+        return replacements
+
+    def caption_source_url(self, source_url: str, source_replacements: dict[str, str]) -> str:
+        if source_replacements and host_matches(source_url, self.config.source_page_hosts):
+            return ""
+        return source_url
 
     def fetch_source_context(self, source_url: str) -> tuple[str, list[LinkInfo]]:
         if not source_url or is_spam_url(source_url):
@@ -1444,7 +1657,13 @@ class MirrorBot:
             LOGGER.warning("Source context fetch failed for %s: %s", source_url, exc)
             return "", []
 
-    def dispatch_telegram(self, item: FeedItem, wp_link: str, important_links: list[LinkInfo]) -> None:
+    def dispatch_telegram(
+        self,
+        item: FeedItem,
+        wp_link: str,
+        important_links: list[LinkInfo],
+        caption_source_url: str,
+    ) -> None:
         ctype = normalize_mime(item.enclosure_type)
         clean_text = remove_spam_urls_from_text(item.text)
         rewritten_text = self.ai.rewrite_plain(clean_text)
@@ -1453,7 +1672,7 @@ class MirrorBot:
             rewritten_text,
             clean_text,
             wp_link,
-            item.source_url,
+            caption_source_url,
             important_links,
             self.config,
             900,
@@ -1463,7 +1682,7 @@ class MirrorBot:
             rewritten_text,
             clean_text,
             wp_link,
-            item.source_url,
+            caption_source_url,
             important_links,
             self.config,
             3900,
