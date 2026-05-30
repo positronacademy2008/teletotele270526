@@ -149,12 +149,14 @@ IMPORTANT_LABEL_HINTS = (
     "download",
 )
 
-AI_SYSTEM_PROMPT = """Rewrite in clear Hinglish.
+AI_SYSTEM_PROMPT = """Rewrite in clear, original Hinglish.
 Keep all facts, dates, numbers, fees, eligibility, deadlines, official names, and links unchanged.
+Use fresh wording and structure; do not copy sentence phrasing from the source except official names, dates, and links.
 Do not invent details.
 Do not remove official/source links.
 Make it suitable for an educational/news update channel.
-Return plain text for Telegram captions and clean HTML for WordPress content when requested."""
+Return plain text for Telegram captions and clean HTML for WordPress content when requested.
+Do not include source images or copyrighted media."""
 
 
 def setup_logging() -> None:
@@ -225,6 +227,7 @@ class Config:
     max_retries: int = 3
     allow_insecure_ssl: bool = False
     dry_run: bool = False
+    copyright_safe_mode: bool = True
     follow_line_tg: str = ""
     follow_line_wa: str = ""
     wp_post_type: str = "pages"
@@ -269,6 +272,7 @@ class Config:
             max_retries=parse_int(os.environ.get("MAX_RETRIES"), 3, minimum=0),
             allow_insecure_ssl=parse_bool(os.environ.get("ALLOW_INSECURE_SSL"), False),
             dry_run=parse_bool(os.environ.get("DRY_RUN"), False),
+            copyright_safe_mode=parse_bool(os.environ.get("COPYRIGHT_SAFE_MODE"), True),
             follow_line_tg=os.environ.get("FOLLOW_LINE_TG", os.environ.get("FOLLOW_LINE", "")).strip(),
             follow_line_wa=os.environ.get("FOLLOW_LINE_WA", "").strip(),
             wp_post_type=post_type,
@@ -654,6 +658,14 @@ def sanitize_html_content(markup: str, base_url: str = "") -> str:
         if is_spam_url(link.get("href", "")) or line_has_spam(link.get_text(" ", strip=True)):
             link.unwrap()
     return str(soup)
+
+
+def remove_source_images(soup_or_tag: Any) -> None:
+    for figure in list(soup_or_tag.find_all("figure")):
+        if figure.find("img") or figure.find("picture") or figure.find("source"):
+            figure.decompose()
+    for tag in list(soup_or_tag.find_all(["picture", "img", "source"])):
+        tag.decompose()
 
 
 def remove_existing_important_link_sections(soup_or_tag: Any) -> None:
@@ -1149,6 +1161,10 @@ class WordPressClient:
             return ""
 
     def normalize_images(self, soup_or_tag: Any, base_url: str = "") -> None:
+        if self.config.copyright_safe_mode:
+            remove_source_images(soup_or_tag)
+            return
+
         for source in soup_or_tag.find_all("source"):
             if source.parent and getattr(source.parent, "name", "") == "picture":
                 source.decompose()
@@ -1230,9 +1246,16 @@ class AIRewriter:
         )
 
     def rewrite_html(self, source_html: str) -> str:
+        if self.config.copyright_safe_mode:
+            instruction = (
+                "Return clean HTML for WordPress content as an original factual digest. "
+                "Preserve every href attribute, but remove img/source/picture tags and any copied media."
+            )
+        else:
+            instruction = "Return clean HTML for WordPress content. Preserve every href and src attribute."
         return self._rewrite(
             source_html,
-            "Return clean HTML for WordPress content. Preserve every href and src attribute.",
+            instruction,
             is_html=True,
         )
 
@@ -1251,7 +1274,14 @@ class AIRewriter:
             )
             result = response.choices[0].message.content or ""
             result = strip_markdown_fence(result)
-            if not fact_safety_check(source, result, is_html=is_html):
+            min_ratio = 0.2 if self.config.copyright_safe_mode else 0.35
+            if not fact_safety_check(
+                source,
+                result,
+                is_html=is_html,
+                preserve_images=not self.config.copyright_safe_mode,
+                min_text_ratio=min_ratio,
+            ):
                 LOGGER.warning("AI output failed fact-safety checks; using cleaned original content.")
                 return source
             return result
@@ -1274,13 +1304,19 @@ def count_html_assets(markup: str) -> tuple[int, int]:
     return images, links
 
 
-def fact_safety_check(original: str, candidate: str, is_html: bool) -> bool:
+def fact_safety_check(
+    original: str,
+    candidate: str,
+    is_html: bool,
+    preserve_images: bool = True,
+    min_text_ratio: float = 0.35,
+) -> bool:
     if not candidate or not normalize_whitespace(strip_tags(candidate if is_html else candidate)):
         return False
 
     original_text = strip_tags(original) if is_html else normalize_whitespace(original)
     candidate_text = strip_tags(candidate) if is_html else normalize_whitespace(candidate)
-    if len(original_text) > 180 and len(candidate_text) < max(80, int(len(original_text) * 0.35)):
+    if len(original_text) > 180 and len(candidate_text) < max(80, int(len(original_text) * min_text_ratio)):
         return False
 
     original_urls = set(extract_urls(original))
@@ -1294,7 +1330,7 @@ def fact_safety_check(original: str, candidate: str, is_html: bool) -> bool:
     if is_html:
         original_images, original_links = count_html_assets(original)
         new_images, new_links = count_html_assets(candidate)
-        if new_images < original_images:
+        if preserve_images and new_images < original_images:
             return False
         if new_links < max(0, original_links - max(1, original_links // 4)):
             return False
@@ -1391,6 +1427,138 @@ def brand_image_bytes(image_bytes: bytes, content_type: str, config: Config) -> 
     except Exception as exc:
         LOGGER.warning("Image branding failed; using original image. Error: %s", exc)
         return image_bytes, content_type
+
+
+def text_width(draw: Any, text: str, font: Any) -> int:
+    bbox = draw.textbbox((0, 0), text or "", font=font)
+    return max(0, bbox[2] - bbox[0])
+
+
+def wrap_draw_text(draw: Any, text: str, font: Any, max_width: int, max_lines: int) -> list[str]:
+    words = normalize_whitespace(text or "").split()
+    lines: list[str] = []
+    current = ""
+
+    def append_line(line: str) -> bool:
+        if len(lines) >= max_lines:
+            return False
+        lines.append(line)
+        return True
+
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if text_width(draw, trial, font) <= max_width:
+            current = trial
+            continue
+        if current and not append_line(current):
+            break
+        current = ""
+        if text_width(draw, word, font) <= max_width:
+            current = word
+            continue
+
+        chunk = ""
+        for char in word:
+            trial_chunk = chunk + char
+            if text_width(draw, trial_chunk, font) <= max_width:
+                chunk = trial_chunk
+                continue
+            if chunk and not append_line(chunk):
+                break
+            chunk = char
+        current = chunk
+        if len(lines) >= max_lines:
+            break
+
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if len(lines) == max_lines and words:
+        last = lines[-1]
+        while last and text_width(draw, last + "...", font) > max_width:
+            last = last[:-1].rstrip()
+        lines[-1] = (last + "...") if last else "..."
+    return lines
+
+
+def draw_wrapped_text(
+    draw: Any,
+    text: str,
+    font: Any,
+    x: int,
+    y: int,
+    max_width: int,
+    max_lines: int,
+    fill: tuple[int, int, int],
+    line_gap: int,
+) -> int:
+    for line in wrap_draw_text(draw, text, font, max_width, max_lines):
+        draw.text((x, y), line, font=font, fill=fill)
+        bbox = draw.textbbox((x, y), line, font=font)
+        y += max(18, bbox[3] - bbox[1]) + line_gap
+    return y
+
+
+def make_original_update_image_bytes(title: str, content_text: str, config: Config) -> tuple[bytes, str]:
+    if Image is None or ImageDraw is None or ImageFont is None:
+        LOGGER.warning("Pillow is not installed; copyright-safe image poster skipped.")
+        return b"", ""
+
+    try:
+        width, height = 1280, 720
+        img = Image.new("RGB", (width, height), (248, 250, 252))
+        draw = ImageDraw.Draw(img)
+
+        header = (24, 96, 82)
+        ink = (22, 31, 45)
+        muted = (71, 85, 105)
+        accent = (226, 176, 64)
+        footer = (30, 41, 59)
+
+        draw.rectangle((0, 0, width, 92), fill=header)
+        draw.rectangle((0, height - 86, width, height), fill=footer)
+        draw.rectangle((0, 92, 18, height - 86), fill=accent)
+        draw.rectangle((18, 92, width, 104), fill=(224, 231, 255))
+
+        brand_font = find_brand_font(34)
+        title_font = find_brand_font(54)
+        point_font = find_brand_font(29)
+        small_font = find_brand_font(24)
+
+        brand = config.image_brand_name or DEFAULT_IMAGE_BRAND_NAME
+        draw.text((54, 27), brand[:55], font=brand_font, fill=(255, 255, 255))
+        draw.text((width - 250, 31), "Education Update", font=small_font, fill=(220, 252, 231))
+
+        x = 72
+        y = 142
+        y = draw_wrapped_text(draw, title, title_font, x, y, width - 144, 3, ink, 12)
+        y += 16
+
+        points = sentence_candidates(content_text)
+        title_key = re.sub(r"\W+", "", (title or "").lower())
+        points = [point for point in points if re.sub(r"\W+", "", point.lower()) != title_key][:3]
+        if not points:
+            points = ["Latest details, dates, eligibility aur official links verify karke update dekhein."]
+
+        for point in points:
+            if y > height - 170:
+                break
+            draw.ellipse((x, y + 11, x + 14, y + 25), fill=accent)
+            y = draw_wrapped_text(draw, point, point_font, x + 34, y, width - 150, 2, muted, 8)
+            y += 8
+
+        footer_lines = [
+            config.image_brand_address or DEFAULT_IMAGE_BRAND_ADDRESS,
+            f"Contact: {config.image_brand_contact or DEFAULT_IMAGE_BRAND_CONTACT}",
+        ]
+        footer_text = " | ".join(line for line in footer_lines if line)
+        draw_wrapped_text(draw, footer_text, small_font, 54, height - 61, width - 108, 1, (241, 245, 249), 0)
+
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=90, optimize=True)
+        return out.getvalue(), "image/jpeg"
+    except Exception as exc:
+        LOGGER.warning("Copyright-safe image poster failed: %s", exc)
+        return b"", ""
 
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
@@ -1514,10 +1682,51 @@ def first_non_spam_url(text: str) -> str:
     return ""
 
 
+def important_links_html(links: list[LinkInfo]) -> str:
+    links = dedupe_links(links, limit=12)
+    if not links:
+        return ""
+    items = []
+    for link in links:
+        href = html.escape(link.href, quote=True)
+        label = html.escape(link.label or urlparse(link.href).netloc or "Official Link")
+        items.append(f'<li><a href="{href}" target="_blank" rel="nofollow noopener">{label}</a></li>')
+    return "<h2>Important Links</h2>\n<ul>" + "".join(items) + "</ul>"
+
+
+def copyright_safe_digest_html(title: str, raw_html: str, fallback_text: str, source_url: str) -> str:
+    source_text = html_to_text_with_links(raw_html, source_url) if raw_html else fallback_text
+    source_text = remove_spam_urls_from_text(source_text)
+    points = sentence_candidates(f"{title}\n{source_text}")
+    title_key = re.sub(r"\W+", "", (title or "").lower())
+    points = [point for point in points if re.sub(r"\W+", "", point.lower()) != title_key][:8]
+
+    parts = [f"<h1>{html.escape(title)}</h1>"]
+    if points:
+        parts.append("<h2>Key Highlights</h2>")
+        parts.append("<ul>" + "".join(f"<li>{html.escape(point)}</li>" for point in points) + "</ul>")
+    else:
+        summary = trim_preserving_urls(remove_spam_urls_from_text(strip_tags(raw_html) or fallback_text), 420)
+        if summary:
+            parts.append(f"<p>{html.escape(summary)}</p>")
+
+    links = extract_important_links(raw_html or fallback_text, source_url)
+    links_block = important_links_html(links)
+    if links_block:
+        parts.append(links_block)
+    return "\n".join(parts)
+
+
 def build_wordpress_content(item: FeedItem, ai: AIRewriter, config: Config) -> str:
     raw_html = item.html_content or text_to_html(item.text)
     cleaned_html = sanitize_html_content(raw_html, item.source_url or "")
     cleaned_html = remove_disallowed_source_links(cleaned_html, config, item.source_url or "")
+    if config.copyright_safe_mode:
+        digest_html = copyright_safe_digest_html(item.title, cleaned_html, item.text, item.source_url or "")
+        digest_html = ai.rewrite_html(digest_html)
+        digest_html = remove_disallowed_source_links(digest_html, config, item.source_url or "")
+        return "\n".join(piece for piece in [digest_html, source_block(item.source_url, config)] if piece)
+
     cleaned_html = add_digest_heading(cleaned_html, item.title)
     cleaned_html = ai.rewrite_html(cleaned_html)
     cleaned_html = remove_disallowed_source_links(cleaned_html, config, item.source_url or "")
@@ -1543,6 +1752,12 @@ def build_source_page_content(
     raw_html = source_html or text_to_html(fallback_text)
     cleaned_html = sanitize_html_content(raw_html, source_url)
     cleaned_html = remove_disallowed_source_links(cleaned_html, config, source_url)
+    if config.copyright_safe_mode:
+        digest_html = copyright_safe_digest_html(title, cleaned_html, fallback_text, source_url)
+        digest_html = ai.rewrite_html(digest_html)
+        digest_html = remove_disallowed_source_links(digest_html, config, source_url)
+        return "\n".join(piece for piece in [digest_html, source_block(source_url, config)] if piece)
+
     cleaned_html = add_digest_heading(cleaned_html, title)
     cleaned_html = ai.rewrite_html(cleaned_html)
     cleaned_html = remove_disallowed_source_links(cleaned_html, config, source_url)
@@ -1957,22 +2172,27 @@ class MirrorBot:
 
     def send_image_item(self, item: FeedItem, media_caption: str, fallback_text: str) -> None:
         try:
-            response = self.session.get(
-                item.enclosure_url,
-                headers=default_headers(self.config.feed_url),
-                timeout=60,
-                verify=self.config.verify_ssl,
-            )
-            response.raise_for_status()
-            content_type = normalize_mime(response.headers.get("Content-Type", "")) or normalize_mime(item.enclosure_type)
-            if not content_type.startswith("image/"):
-                guessed = mimetypes.guess_type(item.enclosure_url)[0] or ""
-                if not guessed.startswith("image/"):
-                    raise ValueError(f"Enclosure MIME is not an image: {content_type or 'unknown'}")
-                content_type = guessed
-            image_bytes, content_type = brand_image_bytes(response.content, content_type, self.config)
+            if self.config.copyright_safe_mode:
+                image_bytes, content_type = make_original_update_image_bytes(item.title, item.text, self.config)
+                if not image_bytes:
+                    raise RuntimeError("Could not generate copyright-safe image poster")
+            else:
+                response = self.session.get(
+                    item.enclosure_url,
+                    headers=default_headers(self.config.feed_url),
+                    timeout=60,
+                    verify=self.config.verify_ssl,
+                )
+                response.raise_for_status()
+                content_type = normalize_mime(response.headers.get("Content-Type", "")) or normalize_mime(item.enclosure_type)
+                if not content_type.startswith("image/"):
+                    guessed = mimetypes.guess_type(item.enclosure_url)[0] or ""
+                    if not guessed.startswith("image/"):
+                        raise ValueError(f"Enclosure MIME is not an image: {content_type or 'unknown'}")
+                    content_type = guessed
+                image_bytes, content_type = brand_image_bytes(response.content, content_type, self.config)
         except Exception as exc:
-            LOGGER.warning("Image download/validation failed; falling back to text message. Error: %s", exc)
+            LOGGER.warning("Image preparation failed; falling back to text message. Error: %s", exc)
             for channel in self.config.dest_channels:
                 self.telegram.send_text(channel, fallback_text)
             return
