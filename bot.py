@@ -351,8 +351,20 @@ def default_headers(referer: str = "") -> dict[str, str]:
     return headers
 
 
+def parse_url(value: str) -> Any:
+    try:
+        return urlparse(clean_url(value or ""))
+    except ValueError:
+        return urlparse("")
+
+
+def url_host_label(url: str, fallback: str = "Source") -> str:
+    parsed = parse_url(url)
+    return parsed.netloc or fallback
+
+
 def origin_from_url(url: str) -> str:
-    parsed = urlparse(url or "")
+    parsed = parse_url(url)
     if not parsed.scheme or not parsed.netloc:
         return ""
     return f"{parsed.scheme}://{parsed.netloc}"
@@ -368,7 +380,9 @@ def make_soup(markup: str, parser: str = "html.parser") -> Any:
 
 
 def clean_url(raw_url: str) -> str:
-    return (raw_url or "").strip().rstrip(TRAILING_URL_PUNCT)
+    value = (raw_url or "").strip()
+    value = re.sub(r"\[\s*(?:\.{3}|…|[^\]]{0,30})?\s*$", "", value)
+    return value.rstrip(TRAILING_URL_PUNCT + "[")
 
 
 def canonical_url(url: str) -> str:
@@ -381,7 +395,13 @@ def safe_url(raw_url: str | None, base_url: str = "") -> str:
     raw_url = html.unescape(str(raw_url).strip())
     if not raw_url or raw_url.startswith(("data:", "blob:", "javascript:", "mailto:", "tel:", "#")):
         return ""
-    return clean_url(urljoin(base_url, raw_url))
+    try:
+        candidate = clean_url(urljoin(base_url, raw_url))
+        parse_url(candidate)
+        return candidate
+    except ValueError:
+        LOGGER.warning("Skipping malformed URL: %s", raw_url[:160])
+        return ""
 
 
 def extract_urls(text: str) -> list[str]:
@@ -389,15 +409,16 @@ def extract_urls(text: str) -> list[str]:
     seen: set[str] = set()
     for match in URL_RE.findall(text or ""):
         url = clean_url(match)
+        parsed = parse_url(url)
         key = url.rstrip("/")
-        if url and key not in seen:
+        if url and parsed.scheme in {"http", "https"} and key not in seen:
             seen.add(key)
             urls.append(url)
     return urls
 
 
 def host_matches(url: str, hosts: Iterable[str]) -> bool:
-    parsed = urlparse(url or "")
+    parsed = parse_url(url)
     hostname = (parsed.netloc or parsed.path.split("/", 1)[0]).lower()
     hostname = hostname.split("@")[-1].split(":", 1)[0].removeprefix("www.")
     for raw_host in hosts:
@@ -405,7 +426,7 @@ def host_matches(url: str, hosts: Iterable[str]) -> bool:
         if not host:
             continue
         if "://" in host:
-            host = urlparse(host).netloc.lower()
+            host = parse_url(host).netloc.lower()
         host = host.split("/", 1)[0].split(":", 1)[0].removeprefix("www.")
         if hostname == host or hostname.endswith("." + host):
             return True
@@ -413,7 +434,7 @@ def host_matches(url: str, hosts: Iterable[str]) -> bool:
 
 
 def is_pdf_url(url: str) -> bool:
-    path = urlparse(clean_url(url)).path.lower()
+    path = parse_url(url).path.lower()
     return path.endswith(".pdf")
 
 
@@ -425,7 +446,7 @@ def is_spam_url(url: str) -> bool:
     lower = (url or "").lower()
     if any(pattern in lower for pattern in SUSPICIOUS_INVITE_PATTERNS):
         return True
-    host = urlparse(url).netloc.lower()
+    host = parse_url(url).netloc.lower()
     return any(hint in host or hint in lower for hint in SPAM_HOST_HINTS)
 
 
@@ -701,7 +722,7 @@ def link_label(link: Any) -> str:
     label = text or title or aria
     if not label:
         href = link.get("href") or ""
-        parsed = urlparse(href)
+        parsed = parse_url(href)
         label = parsed.netloc or href
     return label[:100]
 
@@ -709,7 +730,7 @@ def link_label(link: Any) -> str:
 def is_important_link(label: str, href: str) -> bool:
     if not href or is_spam_url(href):
         return False
-    parsed = urlparse(href)
+    parsed = parse_url(href)
     if parsed.scheme not in {"http", "https"}:
         return False
     lower_href = href.lower()
@@ -734,7 +755,7 @@ def dedupe_links(links: Iterable[LinkInfo], limit: int = 24) -> list[LinkInfo]:
         if key in seen:
             continue
         seen.add(key)
-        output.append(LinkInfo(label=link.label.strip()[:100] or urlparse(href).netloc, href=href))
+        output.append(LinkInfo(label=link.label.strip()[:100] or url_host_label(href), href=href))
         if len(output) >= limit:
             break
     return output
@@ -750,7 +771,7 @@ def extract_links_from_html(markup: str, base_url: str = "") -> list[LinkInfo]:
         links.append(LinkInfo(label=link_label(link), href=href))
     for url in extract_urls(soup.get_text(" ", strip=True)):
         if not is_spam_url(url):
-            links.append(LinkInfo(label=urlparse(url).netloc or "Source", href=url))
+            links.append(LinkInfo(label=url_host_label(url), href=url))
     return dedupe_links(links)
 
 
@@ -758,7 +779,7 @@ def extract_important_links(markup: str, base_url: str = "", extra_urls: Iterabl
     links = extract_links_from_html(markup, base_url)
     for url in extra_urls:
         if url and not is_spam_url(url):
-            links.append(LinkInfo(label=urlparse(url).netloc or "Source", href=url))
+            links.append(LinkInfo(label=url_host_label(url), href=url))
     return dedupe_links((link for link in links if is_important_link(link.label, link.href)), limit=24)
 
 
@@ -829,7 +850,7 @@ def source_block(source_url: str, config: Config) -> str:
     if config.web_follow_line:
         lines.append(html.escape(config.web_follow_line))
     if source_url:
-        host = urlparse(source_url).netloc or source_url
+        host = url_host_label(source_url, source_url)
         if is_pdf_url(source_url):
             href = html.escape(source_url, quote=True)
             label = html.escape(host)
@@ -1338,7 +1359,7 @@ def fact_safety_check(
 
 
 def guess_filename(source_url: str, content_type: str = "") -> str:
-    parsed_path = urlparse(source_url).path
+    parsed_path = parse_url(source_url).path
     filename = os.path.basename(parsed_path).strip() or f"file-{int(time.time() * 1000)}"
     filename = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
     guessed_ext = mimetypes.guess_extension(normalize_mime(content_type)) or ""
@@ -1689,7 +1710,7 @@ def important_links_html(links: list[LinkInfo]) -> str:
     items = []
     for link in links:
         href = html.escape(link.href, quote=True)
-        label = html.escape(link.label or urlparse(link.href).netloc or "Official Link")
+        label = html.escape(link.label or url_host_label(link.href, "Official Link"))
         items.append(f'<li><a href="{href}" target="_blank" rel="nofollow noopener">{label}</a></li>')
     return "<h2>Important Links</h2>\n<ul>" + "".join(items) + "</ul>"
 
