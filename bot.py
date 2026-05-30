@@ -38,6 +38,13 @@ try:
 except Exception:
     OpenAI = None
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
 
 LOGGER = logging.getLogger("improved_bot")
 
@@ -72,6 +79,13 @@ SPAM_TEXT_HINTS = (
 )
 HARD_SKIP_PHRASES = ("शिक्षा विभाग समाचार",)
 DEFAULT_SOURCE_PAGE_HOSTS = ("indianaukrihelp.com",)
+DEFAULT_WEB_FOLLOW_LINE = (
+    "📢 Follow TELEGRAM WHATSAPP https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q | "
+    "TELEGRAM https://t.me/RAJASTHAN_TODAY"
+)
+DEFAULT_IMAGE_BRAND_NAME = "POSITRON ACADEMY"
+DEFAULT_IMAGE_BRAND_ADDRESS = "चौधरी के पास हॉस्पिटल, पांसल चौराहा,भीलवाड़ा"
+DEFAULT_IMAGE_BRAND_CONTACT = "8104894648"
 SPAM_HOST_HINTS = (
     "1xbet",
     "bet365",
@@ -182,6 +196,20 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
+def slugify(value: str, max_length: int = 90) -> str:
+    value = normalize_whitespace(strip_tags(value or "")).lower()
+    value = re.sub(r"https?://", "", value)
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+    return (value or "update")[:max_length].strip("-") or "update"
+
+
+def stable_slug(prefix: str, stable_value: str, title: str = "") -> str:
+    digest = sha256_text(stable_value or title)[:12]
+    title_part = slugify(title or stable_value, 54)
+    return f"{prefix}-{title_part}-{digest}"[:95].strip("-")
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -205,6 +233,12 @@ class Config:
     wp_referer: str = ""
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
+    web_follow_line: str = DEFAULT_WEB_FOLLOW_LINE
+    brand_images: bool = True
+    image_brand_name: str = DEFAULT_IMAGE_BRAND_NAME
+    image_brand_address: str = DEFAULT_IMAGE_BRAND_ADDRESS
+    image_brand_contact: str = DEFAULT_IMAGE_BRAND_CONTACT
+    wp_skip_existing: bool = True
     groq_model: str = "llama-3.1-8b-instant"
 
     @classmethod
@@ -243,6 +277,12 @@ class Config:
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
             skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
+            web_follow_line=os.environ.get("WEB_FOLLOW_LINE", DEFAULT_WEB_FOLLOW_LINE).strip(),
+            brand_images=parse_bool(os.environ.get("BRAND_IMAGES"), True),
+            image_brand_name=os.environ.get("IMAGE_BRAND_NAME", DEFAULT_IMAGE_BRAND_NAME).strip(),
+            image_brand_address=os.environ.get("IMAGE_BRAND_ADDRESS", DEFAULT_IMAGE_BRAND_ADDRESS).strip(),
+            image_brand_contact=os.environ.get("IMAGE_BRAND_CONTACT", DEFAULT_IMAGE_BRAND_CONTACT).strip(),
+            wp_skip_existing=parse_bool(os.environ.get("WP_SKIP_EXISTING"), True),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
         )
 
@@ -366,6 +406,15 @@ def host_matches(url: str, hosts: Iterable[str]) -> bool:
         if hostname == host or hostname.endswith("." + host):
             return True
     return False
+
+
+def is_pdf_url(url: str) -> bool:
+    path = urlparse(clean_url(url)).path.lower()
+    return path.endswith(".pdf")
+
+
+def is_blocked_source_url(url: str, config: Config) -> bool:
+    return host_matches(url, config.source_page_hosts) and not is_pdf_url(url)
 
 
 def is_spam_url(url: str) -> bool:
@@ -591,6 +640,7 @@ def sanitize_html_content(markup: str, base_url: str = "") -> str:
     soup = make_soup(markup or "", "html.parser")
     for element in soup(["script", "style", "noscript", "iframe", "form", "button"]):
         element.decompose()
+    remove_existing_important_link_sections(soup)
     normalize_links(soup, base_url)
     for text_node in list(soup.find_all(string=True)):
         parent_name = getattr(text_node.parent, "name", "")
@@ -604,6 +654,32 @@ def sanitize_html_content(markup: str, base_url: str = "") -> str:
         if is_spam_url(link.get("href", "")) or line_has_spam(link.get_text(" ", strip=True)):
             link.unwrap()
     return str(soup)
+
+
+def remove_existing_important_link_sections(soup_or_tag: Any) -> None:
+    selectors = (
+        ".important-links",
+        ".important-link",
+        ".important_official_links",
+        ".important-official-links",
+        "#important-links",
+        "#important_link",
+    )
+    for element in list(soup_or_tag.select(",".join(selectors))):
+        element.decompose()
+
+    for heading in list(soup_or_tag.find_all(re.compile(r"^h[1-6]$"))):
+        heading_text = normalize_whitespace(heading.get_text(" ", strip=True)).lower()
+        if "important links" not in heading_text and "important official links" not in heading_text:
+            continue
+        container = heading.parent
+        if container and getattr(container, "name", "") in {"section", "div", "article"}:
+            container.decompose()
+        else:
+            sibling = heading.find_next_sibling()
+            heading.decompose()
+            if sibling and getattr(sibling, "name", "") in {"ul", "ol", "table", "p", "div"}:
+                sibling.decompose()
 
 
 def link_label(link: Any) -> str:
@@ -705,32 +781,56 @@ def apply_link_replacements_html(markup: str, replacements: dict[str, str], base
     return str(soup)
 
 
-def important_links_block(links: list[LinkInfo]) -> str:
-    if not links:
-        return ""
-    items = []
-    for link in links:
-        href = html.escape(link.href, quote=True)
-        label = html.escape(link.label or link.href)
-        items.append(f'<li><a href="{href}" target="_blank" rel="nofollow noopener">{label}</a></li>')
-    return (
-        '<section class="important-links">'
-        "<h2>Important Links</h2>"
-        f"<ul>{''.join(items)}</ul>"
-        "</section>"
-    )
+def remove_disallowed_source_links(markup: str, config: Config, base_url: str = "") -> str:
+    if not markup:
+        return markup
+    soup = make_soup(markup, "html.parser")
+
+    for link in list(soup.find_all("a", href=True)):
+        href = safe_url(link.get("href"), base_url)
+        if not href or not is_blocked_source_url(href, config):
+            continue
+        label = normalize_whitespace(link.get_text(" ", strip=True))
+        if not label or URL_RE.fullmatch(label):
+            link.decompose()
+        else:
+            link.replace_with(label)
+
+    for text_node in list(soup.find_all(string=True)):
+        parent_name = getattr(text_node.parent, "name", "")
+        if parent_name in {"a", "script", "style", "textarea"}:
+            continue
+        original = str(text_node)
+
+        def replace(match: re.Match[str]) -> str:
+            url = clean_url(match.group(1))
+            return "" if is_blocked_source_url(url, config) else url
+
+        replaced = URL_RE.sub(replace, original)
+        if replaced != original:
+            text_node.replace_with(replaced)
+    return str(soup)
 
 
-def source_block(source_url: str) -> str:
-    if not source_url:
+def source_block(source_url: str, config: Config) -> str:
+    lines: list[str] = []
+    if config.web_follow_line:
+        lines.append(html.escape(config.web_follow_line))
+    if source_url:
+        host = urlparse(source_url).netloc or source_url
+        if is_pdf_url(source_url):
+            href = html.escape(source_url, quote=True)
+            label = html.escape(host)
+            lines.append(f'<a href="{href}" target="_blank" rel="nofollow noopener">{label}</a>')
+        else:
+            lines.append(f"Source attribution: {html.escape(host)}")
+    if not lines:
         return ""
-    href = html.escape(source_url, quote=True)
-    label = html.escape(urlparse(source_url).netloc or source_url)
     return (
         '<section class="source-link">'
         "<h2>Official/Source Link</h2>"
-        f'<p><a href="{href}" target="_blank" rel="nofollow noopener">{label}</a></p>'
-        "</section>"
+        + "".join(f"<p>{line}</p>" for line in lines)
+        + "</section>"
     )
 
 
@@ -969,6 +1069,22 @@ class WordPressClient:
                 time.sleep(min(2 ** attempt, 8))
         raise RuntimeError(f"WordPress API failed: {last_error}")
 
+    def find_existing_link(self, resource: str, slug: str) -> str:
+        if not slug:
+            return ""
+        try:
+            payload = self.request_json(
+                "GET",
+                self.endpoint(resource),
+                params={"slug": slug, "per_page": 1},
+                timeout=min(self.config.wp_timeout, 20),
+            )
+            if isinstance(payload, list) and payload:
+                return payload[0].get("link", "")
+        except Exception as exc:
+            LOGGER.warning("Could not check existing WordPress slug %s: %s", slug, exc)
+        return ""
+
     def upload_media_bytes(self, media_bytes: bytes, source_url: str, content_type: str, alt_text: str = "") -> str:
         if not self.ready:
             return ""
@@ -976,6 +1092,7 @@ class WordPressClient:
         if not content_type.startswith("image/"):
             LOGGER.warning("Skipping WordPress upload for non-image media: %s", source_url)
             return ""
+        media_bytes, content_type = brand_image_bytes(media_bytes, content_type, self.config)
         filename = guess_filename(source_url, content_type)
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
@@ -1055,23 +1172,29 @@ class WordPressClient:
                 if attr.startswith("data-") or attr in {"srcset", "sizes"}:
                     del img[attr]
 
-    def publish(self, title: str, content_html: str, base_url: str = "") -> str:
+    def publish(self, title: str, content_html: str, base_url: str = "", slug: str = "") -> str:
         if not self.ready:
             LOGGER.info("WordPress credentials are not configured; skipping WordPress publish.")
             return ""
         if self.config.dry_run:
             LOGGER.info("[DRY_RUN] Would publish %s to WordPress.", self.config.wp_post_type)
             return ""
+        if slug and self.config.wp_skip_existing:
+            existing_link = self.find_existing_link(self.config.wp_post_type, slug)
+            if existing_link:
+                LOGGER.info("WordPress page already exists for slug %s: %s", slug, existing_link)
+                return existing_link
 
+        content_html = remove_disallowed_source_links(content_html, self.config, base_url)
         soup = make_soup(content_html, "html.parser")
         normalize_links(soup, base_url)
         self.normalize_images(soup, base_url)
-        final_content = str(soup)
+        final_content = remove_disallowed_source_links(str(soup), self.config, base_url)
         data = {
             "title": title[:180],
             "content": final_content,
             "status": "publish",
-            "slug": f"update-{int(time.time() * 1000)}",
+            "slug": slug or f"update-{int(time.time() * 1000)}",
         }
         LOGGER.info("Publishing WordPress %s: %s", self.config.wp_post_type[:-1], title[:80])
         payload = self.request_json(
@@ -1196,6 +1319,80 @@ def normalize_mime(content_type: str | None) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
 
 
+def find_brand_font(size: int) -> Any:
+    if ImageFont is None:
+        return None
+    candidates = (
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/mangal.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    )
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def brand_image_bytes(image_bytes: bytes, content_type: str, config: Config) -> tuple[bytes, str]:
+    content_type = normalize_mime(content_type)
+    if not config.brand_images or Image is None or ImageDraw is None or ImageFont is None:
+        if config.brand_images and Image is None:
+            LOGGER.warning("Pillow is not installed; image branding skipped.")
+        return image_bytes, content_type
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        return image_bytes, content_type
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGBA")
+            width, height = img.size
+            if width < 220 or height < 120:
+                return image_bytes, content_type
+
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            bar_height = max(58, min(height // 4, 130))
+            draw.rectangle((0, height - bar_height, width, height), fill=(10, 20, 35, 190))
+
+            title_font = find_brand_font(max(16, min(width // 22, 34)))
+            body_font = find_brand_font(max(12, min(width // 34, 22)))
+            lines = [
+                config.image_brand_name or DEFAULT_IMAGE_BRAND_NAME,
+                config.image_brand_address or DEFAULT_IMAGE_BRAND_ADDRESS,
+                f"Contact: {config.image_brand_contact or DEFAULT_IMAGE_BRAND_CONTACT}",
+            ]
+            y = height - bar_height + 8
+            x = max(12, width // 35)
+            for index, line in enumerate(lines):
+                font = title_font if index == 0 else body_font
+                fill = (255, 255, 255, 245) if index == 0 else (235, 245, 255, 235)
+                draw.text((x, y), line, font=font, fill=fill)
+                bbox = draw.textbbox((x, y), line, font=font)
+                y += max(16, bbox[3] - bbox[1] + 4)
+
+            branded = Image.alpha_composite(img, overlay)
+            out = io.BytesIO()
+            if content_type == "image/png":
+                branded.save(out, format="PNG", optimize=True)
+                return out.getvalue(), "image/png"
+            if content_type == "image/webp":
+                branded.convert("RGB").save(out, format="WEBP", quality=88, method=6)
+                return out.getvalue(), "image/webp"
+            branded.convert("RGB").save(out, format="JPEG", quality=88, optimize=True)
+            return out.getvalue(), "image/jpeg"
+    except Exception as exc:
+        LOGGER.warning("Image branding failed; using original image. Error: %s", exc)
+        return image_bytes, content_type
+
+
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
     if pikepdf is None:
         LOGGER.warning("pikepdf is not installed; PDF link sanitization skipped.")
@@ -1317,12 +1514,14 @@ def first_non_spam_url(text: str) -> str:
     return ""
 
 
-def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: list[LinkInfo]) -> str:
+def build_wordpress_content(item: FeedItem, ai: AIRewriter, config: Config) -> str:
     raw_html = item.html_content or text_to_html(item.text)
     cleaned_html = sanitize_html_content(raw_html, item.source_url or "")
+    cleaned_html = remove_disallowed_source_links(cleaned_html, config, item.source_url or "")
     cleaned_html = add_digest_heading(cleaned_html, item.title)
     cleaned_html = ai.rewrite_html(cleaned_html)
-    pieces = [cleaned_html, source_block(item.source_url), important_links_block(important_links)]
+    cleaned_html = remove_disallowed_source_links(cleaned_html, config, item.source_url or "")
+    pieces = [cleaned_html, source_block(item.source_url, config)]
     if item.enclosure_url and normalize_mime(item.enclosure_type).startswith("image/"):
         pieces.append(
             "<figure>"
@@ -1339,13 +1538,15 @@ def build_source_page_content(
     source_html: str,
     fallback_text: str,
     ai: AIRewriter,
-    important_links: list[LinkInfo],
+    config: Config,
 ) -> str:
     raw_html = source_html or text_to_html(fallback_text)
     cleaned_html = sanitize_html_content(raw_html, source_url)
+    cleaned_html = remove_disallowed_source_links(cleaned_html, config, source_url)
     cleaned_html = add_digest_heading(cleaned_html, title)
     cleaned_html = ai.rewrite_html(cleaned_html)
-    pieces = [cleaned_html, source_block(source_url), important_links_block(important_links)]
+    cleaned_html = remove_disallowed_source_links(cleaned_html, config, source_url)
+    pieces = [cleaned_html, source_block(source_url, config)]
     return "\n".join(piece for piece in pieces if piece)
 
 
@@ -1405,12 +1606,6 @@ def build_caption(
     fixed_tail: list[str] = []
     if wp_link:
         fixed_tail.append(f"Website: {wp_link}")
-    if source:
-        fixed_tail.append(f"Official/Source link: {source}")
-    if config.follow_line_tg:
-        fixed_tail.append(config.follow_line_tg)
-    if config.follow_line_wa:
-        fixed_tail.append(config.follow_line_wa)
 
     for point_count in range(min(5, len(points)), -1, -1):
         lines = [title.strip()[:180]]
@@ -1523,6 +1718,11 @@ class MirrorBot:
                 self.state.mark_skipped(item.guid, "No useful content after spam cleanup")
                 LOGGER.warning("Item skipped after cleanup: %s", item.title[:80])
                 return
+            existing_link = self.existing_published_link(item)
+            if existing_link:
+                self.state.mark_published(item.guid, existing_link)
+                LOGGER.info("Item already has an existing WordPress page; not forwarding again: %s", existing_link)
+                return
 
             source_page_html, page_links = self.fetch_source_context(item.source_url)
             important_links = dedupe_links(
@@ -1551,8 +1751,13 @@ class MirrorBot:
                     self.state.set_wp_link(item.guid, wp_link)
 
             if self.wordpress.ready and not wp_link:
-                wp_content = build_wordpress_content(item, self.ai, important_links)
-                wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
+                wp_content = build_wordpress_content(item, self.ai, self.config)
+                wp_link = self.wordpress.publish(
+                    item.title,
+                    wp_content,
+                    item.source_url or self.config.feed_url,
+                    slug=self.item_slug(item),
+                )
                 if not wp_link and not self.config.dry_run:
                     raise RuntimeError("WordPress publish did not return a link")
                 if wp_link:
@@ -1570,6 +1775,28 @@ class MirrorBot:
             error = str(exc)
             self.state.mark_failed(item.guid, error)
             LOGGER.error("Item failed: %s | %s", item.title[:100], error)
+
+    def item_slug(self, item: FeedItem) -> str:
+        stable_value = item.guid or item.source_url or item.content_hash or item.title
+        return stable_slug("update", stable_value, item.title)
+
+    def source_url_slug(self, source_url: str, title: str = "") -> str:
+        return stable_slug("source", canonical_url(source_url), title)
+
+    def existing_published_link(self, item: FeedItem) -> str:
+        if not self.wordpress.ready or not self.config.wp_skip_existing:
+            return ""
+        slugs = [self.source_url_slug(url, item.title) for url in self.source_page_urls_from_item(item)]
+        slugs.append(self.item_slug(item))
+        seen: set[str] = set()
+        for slug in slugs:
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            link = self.wordpress.find_existing_link(self.config.wp_post_type, slug)
+            if link:
+                return link
+        return ""
 
     def source_page_urls_from_item(self, item: FeedItem) -> list[str]:
         urls = [item.source_url, *extract_urls(item.text), *extract_urls(strip_tags(item.html_content))]
@@ -1617,8 +1844,8 @@ class MirrorBot:
                 ],
                 limit=24,
             )
-            content = build_source_page_content(item.title, source_url, source_html, item.text, self.ai, important_links)
-            wp_link = self.wordpress.publish(item.title, content, source_url)
+            content = build_source_page_content(item.title, source_url, source_html, item.text, self.ai, self.config)
+            wp_link = self.wordpress.publish(item.title, content, source_url, slug=self.source_url_slug(source_url, item.title))
             if not wp_link and not self.config.dry_run:
                 raise RuntimeError(f"WordPress did not return a link for source page: {source_url}")
             if wp_link:
@@ -1743,6 +1970,7 @@ class MirrorBot:
                 if not guessed.startswith("image/"):
                     raise ValueError(f"Enclosure MIME is not an image: {content_type or 'unknown'}")
                 content_type = guessed
+            image_bytes, content_type = brand_image_bytes(response.content, content_type, self.config)
         except Exception as exc:
             LOGGER.warning("Image download/validation failed; falling back to text message. Error: %s", exc)
             for channel in self.config.dest_channels:
@@ -1751,7 +1979,7 @@ class MirrorBot:
 
         for channel in self.config.dest_channels:
             try:
-                self.telegram.send_photo(channel, response.content, media_caption, content_type)
+                self.telegram.send_photo(channel, image_bytes, media_caption, content_type)
             except Exception as exc:
                 LOGGER.warning("Photo send failed for %s; falling back to text. Error: %s", channel, exc)
                 self.telegram.send_text(channel, fallback_text)
