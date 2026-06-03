@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -70,6 +71,14 @@ BRAND_ADDRESS = (
 BRAND_ADDRESS_FALLBACK = "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
 BRAND_CONTACT = os.environ.get("BRAND_CONTACT", "8104894648").strip() or "8104894648"
 BRAND_SKIP_TYPES = {"image/gif", "image/svg+xml"}
+BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE", "Education & Career Updates").strip() or "Education & Career Updates"
+FONT_DOWNLOAD_URLS = {
+    False: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Regular.ttf",
+    True: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Bold.ttf",
+}
+DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+FONT_SUPPORTS_DEVANAGARI: dict[int, bool] = {}
+FONT_CACHE: dict[tuple[int, bool, bool], Any] = {}
 
 SPAM_TEXT_HINTS = (
     "betting",
@@ -1237,6 +1246,13 @@ def guess_filename(source_url: str, content_type: str = "") -> str:
     guessed_ext = mimetypes.guess_extension(normalize_mime(content_type)) or ""
     if guessed_ext == ".jpe":
         guessed_ext = ".jpg"
+    if guessed_ext:
+        stem, ext = os.path.splitext(filename)
+        expected_exts = {guessed_ext}
+        if guessed_ext == ".jpg":
+            expected_exts.add(".jpeg")
+        if ext and ext.lower() not in expected_exts:
+            filename = f"{stem}{guessed_ext}"
     if "." not in filename and guessed_ext:
         filename += guessed_ext
     if "." not in filename:
@@ -1253,26 +1269,115 @@ def is_brandable_image_type(content_type: str) -> bool:
     return normalized.startswith("image/") and normalized not in BRAND_SKIP_TYPES
 
 
-def load_brand_font(size: int, bold: bool = False) -> Any:
+def has_devanagari(text: str) -> bool:
+    return bool(DEVANAGARI_RE.search(text or ""))
+
+
+def likely_devanagari_font(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    return any(
+        hint in normalized
+        for hint in (
+            "devanagari",
+            "nirmala",
+            "mangal",
+            "lohit",
+            "kalimati",
+            "kokila",
+            "aparajita",
+            "sanskrit",
+        )
+    )
+
+
+def brand_font_candidates(bold: bool, require_devanagari: bool) -> list[tuple[str, bool]]:
+    env_key = "BRAND_FONT_BOLD" if bold else "BRAND_FONT_REGULAR"
+    paths: list[tuple[str, bool]] = []
+    env_path = os.environ.get(env_key, "").strip()
+    if env_path:
+        paths.append((env_path, True))
+
+    font_dir = os.environ.get("BRAND_FONT_DIR", "").strip()
+    if font_dir:
+        filename = "NotoSansDevanagari-Bold.ttf" if bold else "NotoSansDevanagari-Regular.ttf"
+        paths.append((os.path.join(font_dir, filename), True))
+
+    paths.extend(
+        [
+            (r"C:\Windows\Fonts\NirmalaB.ttf" if bold else r"C:\Windows\Fonts\Nirmala.ttf", True),
+            (r"C:\Windows\Fonts\mangal.ttf", True),
+            (r"C:\Windows\Fonts\kokila.ttf", True),
+            ("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf", True),
+            ("/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf", True),
+            ("/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf", True),
+            ("/usr/share/fonts/truetype/lohit-deva/Lohit-Devanagari.ttf", True),
+            ("/usr/share/fonts/truetype/fonts-deva-extra/kalimati.ttf", True),
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", False),
+            ("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", False),
+            (r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf", False),
+        ]
+    )
+    if require_devanagari:
+        paths = [item for item in paths if item[1] or likely_devanagari_font(item[0])]
+    return paths
+
+
+def download_brand_font(bold: bool) -> tuple[str, bool]:
+    font_dir = os.environ.get("BRAND_FONT_DIR", "").strip() or os.path.join(tempfile.gettempdir(), "positron-fonts")
+    filename = "NotoSansDevanagari-Bold.ttf" if bold else "NotoSansDevanagari-Regular.ttf"
+    path = os.path.join(font_dir, filename)
+    if os.path.exists(path):
+        return path, True
+    try:
+        os.makedirs(font_dir, exist_ok=True)
+        response = requests.get(FONT_DOWNLOAD_URLS[bold], timeout=20)
+        response.raise_for_status()
+        if len(response.content) < 10000:
+            raise RuntimeError("downloaded font file is unexpectedly small")
+        with open(path, "wb") as handle:
+            handle.write(response.content)
+        return path, True
+    except Exception as exc:
+        LOGGER.warning("Could not download Hindi font; will use fallback text if needed: %s", exc)
+        return "", False
+
+
+def load_brand_font(size: int, bold: bool = False, require_devanagari: bool = False) -> Any:
     if ImageFont is None:
         return None
-    candidates = (
-        r"C:\Windows\Fonts\NirmalaB.ttf" if bold else r"C:\Windows\Fonts\Nirmala.ttf",
-        r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    )
-    for path in candidates:
+    cache_key = (size, bold, require_devanagari)
+    if cache_key in FONT_CACHE:
+        return FONT_CACHE[cache_key]
+
+    candidates = brand_font_candidates(bold, require_devanagari)
+    for path, supports_devanagari in candidates:
         if path and os.path.exists(path):
             try:
-                return ImageFont.truetype(path, size=size)
+                font = ImageFont.truetype(path, size=size)
+                FONT_SUPPORTS_DEVANAGARI[id(font)] = supports_devanagari or likely_devanagari_font(path)
+                FONT_CACHE[cache_key] = font
+                return font
             except Exception:
                 continue
-    return ImageFont.load_default()
+    if require_devanagari:
+        path, supports_devanagari = download_brand_font(bold)
+        if path and os.path.exists(path):
+            try:
+                font = ImageFont.truetype(path, size=size)
+                FONT_SUPPORTS_DEVANAGARI[id(font)] = supports_devanagari
+                FONT_CACHE[cache_key] = font
+                return font
+            except Exception:
+                pass
+    font = ImageFont.load_default()
+    FONT_SUPPORTS_DEVANAGARI[id(font)] = False
+    FONT_CACHE[cache_key] = font
+    return font
 
 
 def drawable_brand_text(text: str, draw: Any, font: Any) -> str:
+    if has_devanagari(text) and not FONT_SUPPORTS_DEVANAGARI.get(id(font), False):
+        return BRAND_ADDRESS_FALLBACK if text == BRAND_ADDRESS else text.encode("ascii", "ignore").decode("ascii")
     try:
         draw.textbbox((0, 0), text, font=font)
         return text
@@ -1304,6 +1409,35 @@ def wrap_brand_text(draw: Any, text: str, font: Any, max_width: int) -> list[str
     return lines
 
 
+def draw_centered_text(draw: Any, text: str, font: Any, y: int, max_width: int, fill: tuple[int, int, int, int], x0: int = 0) -> int:
+    lines = wrap_brand_text(draw, text, font, max_width)
+    gap = max(5, int(getattr(font, "size", 16) * 0.18))
+    for line in lines:
+        safe_line = drawable_brand_text(line, draw, font)
+        line_width, line_height = text_size(draw, safe_line, font)
+        x = x0 + max(0, (max_width - line_width) // 2)
+        draw.text((x + 1, y + 1), safe_line, font=font, fill=(0, 0, 0, 80))
+        draw.text((x, y), safe_line, font=font, fill=fill)
+        y += line_height + gap
+    return y
+
+
+def fit_inside(size: tuple[int, int], box: tuple[int, int]) -> tuple[int, int]:
+    width, height = size
+    max_width, max_height = box
+    scale = min(max_width / width, max_height / height)
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def rounded_image(image: Any, radius: int) -> Any:
+    mask = Image.new("L", image.size, 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, image.size[0], image.size[1]), radius=radius, fill=255)
+    output = Image.new("RGBA", image.size, (255, 255, 255, 0))
+    output.paste(image, (0, 0), mask)
+    return output
+
+
 def brand_image_bytes(media_bytes: bytes, content_type: str) -> tuple[bytes, str]:
     content_type = normalize_mime(content_type) or "image/jpeg"
     if not media_bytes or not is_brandable_image_type(content_type):
@@ -1314,62 +1448,80 @@ def brand_image_bytes(media_bytes: bytes, content_type: str) -> tuple[bytes, str
 
     try:
         with Image.open(io.BytesIO(media_bytes)) as opened:
-            image = ImageOps.exif_transpose(opened).convert("RGBA")
+            source = ImageOps.exif_transpose(opened).convert("RGBA")
 
-        width, height = image.size
+        width, height = source.size
         if width < 160 or height < 120:
             return media_bytes, content_type
 
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        title_font = load_brand_font(max(20, min(46, width // 18)), bold=True)
-        info_font = load_brand_font(max(13, min(26, width // 34)), bold=False)
+        if height > width * 1.2:
+            canvas_w, canvas_h = 1080, 1350
+        else:
+            canvas_w, canvas_h = 1280, 900
+        margin = max(44, canvas_w // 24)
+        header_h = max(128, canvas_h // 6)
+        footer_h = max(112, canvas_h // 8)
+        body_top = header_h + max(24, canvas_h // 36)
+        body_bottom = canvas_h - footer_h - max(24, canvas_h // 36)
+        body_h = body_bottom - body_top
+        body_w = canvas_w - (margin * 2)
 
-        padding_x = max(14, width // 42)
-        padding_y = max(10, height // 55)
-        gap = max(4, height // 120)
-        max_text_width = width - (padding_x * 2)
-        title_lines = wrap_brand_text(draw, BRAND_NAME, title_font, max_text_width)
-        info_lines = wrap_brand_text(draw, BRAND_ADDRESS, info_font, max_text_width)
-        info_lines.extend(wrap_brand_text(draw, f"Contact: {BRAND_CONTACT}", info_font, max_text_width))
-        all_lines = [(line, title_font, True) for line in title_lines]
-        all_lines.extend((line, info_font, False) for line in info_lines)
+        branded = Image.new("RGBA", (canvas_w, canvas_h), (239, 244, 247, 255))
+        draw = ImageDraw.Draw(branded)
+        draw.rectangle((0, 0, canvas_w, canvas_h), fill=(239, 244, 247, 255))
+        draw.rectangle((0, 0, canvas_w, header_h), fill=(14, 35, 48, 255))
+        draw.rectangle((0, header_h - 8, canvas_w, header_h), fill=(247, 186, 45, 255))
+        draw.rectangle((0, canvas_h - footer_h, canvas_w, canvas_h), fill=(14, 35, 48, 255))
+        draw.rectangle((0, canvas_h - footer_h, canvas_w, canvas_h - footer_h + 6), fill=(247, 186, 45, 255))
 
-        line_heights = []
-        for line, font, _ in all_lines:
-            measured_height = text_size(draw, line, font)[1]
-            font_size = getattr(font, "size", measured_height)
-            line_heights.append(max(measured_height + 4, int(font_size * 1.2)))
-        bottom_padding = padding_y + max(8, height // 90)
-        banner_height = padding_y + bottom_padding + sum(line_heights) + gap * max(0, len(all_lines) - 1)
-        banner_height = min(banner_height, max(height // 2, 120))
-        top = height - banner_height
-        draw.rectangle((0, top, width, height), fill=(13, 26, 35, 222))
-        draw.rectangle((0, top, width, top + max(4, height // 180)), fill=(255, 192, 54, 235))
+        title_font = load_brand_font(max(46, canvas_w // 18), bold=True)
+        tagline_font = load_brand_font(max(22, canvas_w // 48), bold=False)
+        info_font = load_brand_font(max(23, canvas_w // 45), bold=False, require_devanagari=True)
+        contact_font = load_brand_font(max(24, canvas_w // 44), bold=True, require_devanagari=True)
 
-        y = top + padding_y
-        for (line, font, is_title), line_height in zip(all_lines, line_heights):
-            safe_line = drawable_brand_text(line, draw, font)
-            line_width, measured_height = text_size(draw, safe_line, font)
-            x = max(padding_x, (width - line_width) // 2)
-            text_y = y + max(0, (line_height - measured_height) // 2)
-            fill = (255, 214, 85, 255) if is_title else (255, 255, 255, 245)
-            draw.text((x + 1, text_y + 1), safe_line, font=font, fill=(0, 0, 0, 145))
-            draw.text((x, text_y), safe_line, font=font, fill=fill)
-            y += line_height + gap
-            if y > height - bottom_padding:
-                break
+        title_y = max(24, header_h // 5)
+        title_y = draw_centered_text(draw, BRAND_NAME, title_font, title_y, canvas_w - (margin * 2), (255, 214, 85, 255), margin)
+        draw_centered_text(draw, BRAND_TAGLINE, tagline_font, title_y + 6, canvas_w - (margin * 2), (235, 248, 255, 245), margin)
 
-        branded = Image.alpha_composite(image, overlay)
+        panel_radius = 24
+        shadow_offset = max(8, canvas_w // 140)
+        draw.rounded_rectangle(
+            (margin + shadow_offset, body_top + shadow_offset, margin + body_w + shadow_offset, body_top + body_h + shadow_offset),
+            radius=panel_radius,
+            fill=(24, 35, 42, 48),
+        )
+        draw.rounded_rectangle(
+            (margin, body_top, margin + body_w, body_top + body_h),
+            radius=panel_radius,
+            fill=(255, 255, 255, 255),
+            outline=(215, 224, 229, 255),
+            width=2,
+        )
+
+        image_pad = max(22, canvas_w // 46)
+        content_box = (body_w - image_pad * 2, body_h - image_pad * 2)
+        fitted = fit_inside(source.size, content_box)
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        resized = source.resize(fitted, resample)
+        framed = rounded_image(resized, max(12, canvas_w // 80))
+        image_x = margin + image_pad + max(0, (content_box[0] - fitted[0]) // 2)
+        image_y = body_top + image_pad + max(0, (content_box[1] - fitted[1]) // 2)
+        draw.rounded_rectangle(
+            (image_x - 6, image_y - 6, image_x + fitted[0] + 6, image_y + fitted[1] + 6),
+            radius=max(14, canvas_w // 70),
+            fill=(246, 249, 251, 255),
+            outline=(18, 44, 58, 55),
+            width=2,
+        )
+        branded.alpha_composite(framed, (image_x, image_y))
+
+        footer_y = canvas_h - footer_h + max(18, footer_h // 5)
+        footer_y = draw_centered_text(draw, BRAND_ADDRESS, info_font, footer_y, canvas_w - (margin * 2), (255, 255, 255, 245), margin)
+        draw_centered_text(draw, f"Contact: {BRAND_CONTACT}", contact_font, footer_y + 4, canvas_w - (margin * 2), (255, 214, 85, 255), margin)
+
         output = io.BytesIO()
-        if content_type in {"image/jpeg", "image/jpg"}:
-            branded.convert("RGB").save(output, format="JPEG", quality=92, optimize=True)
-            return output.getvalue(), "image/jpeg"
-        if content_type == "image/webp":
-            branded.save(output, format="WEBP", quality=92, method=6)
-            return output.getvalue(), "image/webp"
-        branded.save(output, format="PNG", optimize=True)
-        return output.getvalue(), "image/png"
+        branded.convert("RGB").save(output, format="JPEG", quality=93, optimize=True)
+        return output.getvalue(), "image/jpeg"
     except Exception as exc:
         LOGGER.warning("Image branding failed; using original image. Error: %s", exc)
         return media_bytes, content_type
