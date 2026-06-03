@@ -991,19 +991,39 @@ class WordPressClient:
         if not content_type.startswith("image/"):
             LOGGER.warning("Skipping WordPress upload for non-image media: %s", source_url)
             return ""
+        original_media_bytes = media_bytes
+        original_content_type = content_type
         media_bytes, content_type = brand_image_bytes(media_bytes, content_type)
         filename = guess_filename(source_url, content_type)
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Type": content_type,
         }
-        payload = self.request_json(
-            "POST",
-            self.endpoint("media"),
-            headers=headers,
-            data=media_bytes,
-            timeout=self.config.wp_timeout,
-        )
+        try:
+            payload = self.request_json(
+                "POST",
+                self.endpoint("media"),
+                headers=headers,
+                data=media_bytes,
+                timeout=self.config.wp_timeout,
+            )
+        except Exception:
+            if media_bytes == original_media_bytes and content_type == original_content_type:
+                raise
+            LOGGER.warning("Branded image upload failed; retrying original image for %s", source_url)
+            content_type = original_content_type
+            filename = guess_filename(source_url, content_type)
+            headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": content_type,
+            }
+            payload = self.request_json(
+                "POST",
+                self.endpoint("media"),
+                headers=headers,
+                data=original_media_bytes,
+                timeout=self.config.wp_timeout,
+            )
         media_url = payload.get("source_url") or payload.get("guid", {}).get("rendered", "")
         media_id = payload.get("id")
         if alt_text and media_id:
