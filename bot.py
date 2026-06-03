@@ -214,7 +214,7 @@ class Config:
     follow_line_tg: str = ""
     follow_line_wa: str = ""
     wp_post_type: str = "pages"
-    wp_timeout: int = 25
+    wp_timeout: int = 30
     wp_max_retries: int = 2
     wp_referer: str = ""
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
@@ -252,7 +252,7 @@ class Config:
             follow_line_tg=os.environ.get("FOLLOW_LINE_TG", os.environ.get("FOLLOW_LINE", "")).strip(),
             follow_line_wa=os.environ.get("FOLLOW_LINE_WA", "").strip(),
             wp_post_type=post_type,
-            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 25, minimum=5),
+            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 30, minimum=5),
             wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 2, minimum=1),
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
@@ -926,6 +926,7 @@ class WordPressClient:
         self.config = config
         self.session = session
         self.upload_cache: dict[str, str] = {}
+        self.media_upload_disabled = False
 
     @property
     def ready(self) -> bool:
@@ -942,14 +943,26 @@ class WordPressClient:
         return f"{self.api_root()}/{resource.strip('/')}"
 
     def api_headers(self, headers: dict[str, str] | None = None) -> dict[str, str]:
+        origin = origin_from_url(self.config.wp_url)
         final_headers = {
-            "User-Agent": default_headers()["User-Agent"],
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/137.0.0.0 Safari/537.36"
+            ),
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+            "Connection": "close",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
+            "Sec-Ch-Ua": '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "X-Requested-With": "XMLHttpRequest",
         }
-        origin = origin_from_url(self.config.wp_url)
         if origin:
             final_headers["Origin"] = origin
             final_headers["Referer"] = self.config.wp_referer or f"{origin}/wp-admin/"
@@ -1041,6 +1054,8 @@ class WordPressClient:
     def upload_media_from_url(self, source_url: str, referer: str = "", alt_text: str = "") -> str:
         if not source_url:
             return ""
+        if self.media_upload_disabled:
+            return ""
         if source_url in self.upload_cache:
             return self.upload_cache[source_url]
         try:
@@ -1063,6 +1078,7 @@ class WordPressClient:
             self.upload_cache[source_url] = uploaded
             return uploaded
         except Exception as exc:
+            self.media_upload_disabled = True
             LOGGER.warning("WordPress image upload failed for %s: %s", source_url, exc)
             self.upload_cache[source_url] = ""
             return ""
@@ -1621,6 +1637,7 @@ class MirrorBot:
         self.state = StateStore(config.db_file)
         self.telegram = TelegramClient(config, self.session)
         self.wordpress = WordPressClient(config, self.session)
+        self.wordpress_disabled = False
         self.ai = AIRewriter(config)
 
     def close(self) -> None:
@@ -1700,6 +1717,9 @@ class MirrorBot:
             row = self.state.get(item.guid)
             wp_link = row["wp_link"] if row and row["wp_link"] else ""
 
+            if not self.wordpress.ready:
+                raise RuntimeError("WordPress credentials are required before sending Telegram messages")
+
             source_replacements = self.create_source_pages(
                 item,
                 existing_wp_link=wp_link,
@@ -1713,13 +1733,13 @@ class MirrorBot:
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
-            if self.wordpress.ready and not wp_link:
+            if not wp_link:
                 wp_content = build_wordpress_content(item, self.ai, important_links)
                 wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
-                if not wp_link and not self.config.dry_run:
-                    raise RuntimeError("WordPress publish did not return a link")
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
+            if not wp_link:
+                raise RuntimeError("WordPress publish did not return a link; Telegram message was not sent")
 
             if self.config.dry_run:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])
