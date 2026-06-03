@@ -1063,18 +1063,27 @@ class WordPressClient:
     def upload_media_from_url(self, source_url: str, referer: str = "", alt_text: str = "") -> str:
         if not source_url:
             return ""
-        if self.media_upload_disabled:
-            return ""
         if source_url in self.upload_cache:
             return self.upload_cache[source_url]
         try:
-            response = self.session.get(
-                source_url,
-                headers=default_headers(referer),
-                timeout=45,
-                verify=self.config.verify_ssl,
-            )
-            response.raise_for_status()
+            response = None
+            errors: list[str] = []
+            for candidate_referer in (referer, "", origin_from_url(source_url)):
+                try:
+                    response = self.session.get(
+                        source_url,
+                        headers=default_headers(candidate_referer),
+                        timeout=45,
+                        verify=self.config.verify_ssl,
+                    )
+                    response.raise_for_status()
+                    break
+                except Exception as exc:
+                    errors.append(str(exc))
+                    response = None
+                    continue
+            if response is None:
+                raise RuntimeError("; ".join(errors[-2:]) or "image download failed")
             content_type = normalize_mime(response.headers.get("Content-Type", ""))
             if not content_type.startswith("image/"):
                 guessed = mimetypes.guess_type(source_url)[0] or ""
@@ -1087,7 +1096,6 @@ class WordPressClient:
             self.upload_cache[source_url] = uploaded
             return uploaded
         except Exception as exc:
-            self.media_upload_disabled = True
             LOGGER.warning("WordPress image upload failed for %s: %s", source_url, exc)
             self.upload_cache[source_url] = ""
             return ""
@@ -1460,7 +1468,7 @@ def brand_image_bytes(media_bytes: bytes, content_type: str) -> tuple[bytes, str
             canvas_w, canvas_h = 1280, 900
         margin = max(44, canvas_w // 24)
         header_h = max(128, canvas_h // 6)
-        footer_h = max(112, canvas_h // 8)
+        footer_h = max(150, canvas_h // 6)
         body_top = header_h + max(24, canvas_h // 36)
         body_bottom = canvas_h - footer_h - max(24, canvas_h // 36)
         body_h = body_bottom - body_top
@@ -1476,8 +1484,8 @@ def brand_image_bytes(media_bytes: bytes, content_type: str) -> tuple[bytes, str
 
         title_font = load_brand_font(max(46, canvas_w // 18), bold=True)
         tagline_font = load_brand_font(max(22, canvas_w // 48), bold=False)
-        info_font = load_brand_font(max(23, canvas_w // 45), bold=False, require_devanagari=True)
-        contact_font = load_brand_font(max(24, canvas_w // 44), bold=True, require_devanagari=True)
+        info_font = load_brand_font(max(22, canvas_w // 48), bold=False, require_devanagari=True)
+        contact_font = load_brand_font(max(26, canvas_w // 42), bold=True, require_devanagari=False)
 
         title_y = max(24, header_h // 5)
         title_y = draw_centered_text(draw, BRAND_NAME, title_font, title_y, canvas_w - (margin * 2), (255, 214, 85, 255), margin)
@@ -1515,9 +1523,43 @@ def brand_image_bytes(media_bytes: bytes, content_type: str) -> tuple[bytes, str
         )
         branded.alpha_composite(framed, (image_x, image_y))
 
-        footer_y = canvas_h - footer_h + max(18, footer_h // 5)
-        footer_y = draw_centered_text(draw, BRAND_ADDRESS, info_font, footer_y, canvas_w - (margin * 2), (255, 255, 255, 245), margin)
-        draw_centered_text(draw, f"Contact: {BRAND_CONTACT}", contact_font, footer_y + 4, canvas_w - (margin * 2), (255, 214, 85, 255), margin)
+        footer_top = canvas_h - footer_h
+        address_y = footer_top + max(22, footer_h // 6)
+        next_y = draw_centered_text(
+            draw,
+            BRAND_ADDRESS,
+            info_font,
+            address_y,
+            canvas_w - (margin * 2),
+            (255, 255, 255, 245),
+            margin,
+        )
+        contact_text = f"CONTACT : {BRAND_CONTACT}"
+        contact_width, contact_height = text_size(draw, contact_text, contact_font)
+        pill_pad_x = max(22, canvas_w // 48)
+        pill_pad_y = max(8, canvas_h // 120)
+        pill_w = min(canvas_w - (margin * 2), contact_width + pill_pad_x * 2)
+        pill_h = contact_height + pill_pad_y * 2
+        pill_x = (canvas_w - pill_w) // 2
+        pill_y = min(canvas_h - pill_h - max(14, footer_h // 12), next_y + max(8, footer_h // 18))
+        draw.rounded_rectangle(
+            (pill_x, pill_y, pill_x + pill_w, pill_y + pill_h),
+            radius=max(12, pill_h // 2),
+            fill=(247, 186, 45, 255),
+        )
+        safe_contact = drawable_brand_text(contact_text, draw, contact_font)
+        contact_bbox = draw.textbbox((0, 0), safe_contact, font=contact_font)
+        contact_width = contact_bbox[2] - contact_bbox[0]
+        contact_height = contact_bbox[3] - contact_bbox[1]
+        draw.text(
+            (
+                pill_x + max(0, (pill_w - contact_width) // 2) - contact_bbox[0],
+                pill_y + max(0, (pill_h - contact_height) // 2) - contact_bbox[1],
+            ),
+            safe_contact,
+            font=contact_font,
+            fill=(14, 35, 48, 255),
+        )
 
         output = io.BytesIO()
         branded.convert("RGB").save(output, format="JPEG", quality=93, optimize=True)
@@ -1649,18 +1691,21 @@ def first_non_spam_url(text: str) -> str:
 
 
 def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: list[LinkInfo]) -> str:
-    raw_html = item.html_content or text_to_html(item.text)
-    cleaned_html = sanitize_html_content(raw_html, item.source_url or "")
-    cleaned_html = add_digest_heading(cleaned_html, item.title)
-    cleaned_html = ai.rewrite_html(cleaned_html)
-    pieces = [cleaned_html, source_block(item.source_url), important_links_block(important_links)]
+    raw_text = strip_tags(item.html_content) if item.html_content else item.text
+    raw_text = remove_spam_urls_from_text(raw_text)
+    rewritten = ai.rewrite_plain(raw_text)
+    body_text = rewritten if fact_safety_check(raw_text, rewritten, is_html=False) else raw_text
+    body_html = text_to_html(body_text)
+    pieces = [add_digest_heading(body_html, item.title)]
     if item.enclosure_url and normalize_mime(item.enclosure_type).startswith("image/"):
-        pieces.append(
-            "<figure>"
+        pieces.insert(
+            0,
+            '<figure style="margin:0 0 18px 0; text-align:center;">'
             f'<img src="{html.escape(item.enclosure_url, quote=True)}" alt="{html.escape(item.title, quote=True)}" '
-            'style="max-width:100%; height:auto;" loading="lazy" decoding="async">'
+            'style="max-width:100%; height:auto; border-radius:8px;" loading="lazy" decoding="async">'
             "</figure>"
         )
+    pieces.extend([source_block(item.source_url), important_links_block(important_links)])
     return "\n".join(piece for piece in pieces if piece)
 
 
@@ -1672,11 +1717,11 @@ def build_source_page_content(
     ai: AIRewriter,
     important_links: list[LinkInfo],
 ) -> str:
-    raw_html = source_html or text_to_html(fallback_text)
-    cleaned_html = sanitize_html_content(raw_html, source_url)
-    cleaned_html = add_digest_heading(cleaned_html, title)
-    cleaned_html = ai.rewrite_html(cleaned_html)
-    pieces = [cleaned_html, source_block(source_url), important_links_block(important_links)]
+    raw_text = strip_tags(source_html) if source_html else fallback_text
+    raw_text = remove_spam_urls_from_text(raw_text)
+    rewritten = ai.rewrite_plain(raw_text)
+    body_text = rewritten if fact_safety_check(raw_text, rewritten, is_html=False) else raw_text
+    pieces = [add_digest_heading(text_to_html(body_text), title), source_block(source_url), important_links_block(important_links)]
     return "\n".join(piece for piece in pieces if piece)
 
 
