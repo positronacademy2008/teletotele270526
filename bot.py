@@ -1073,7 +1073,7 @@ class WordPressClient:
                     response = self.session.get(
                         source_url,
                         headers=default_headers(candidate_referer),
-                        timeout=45,
+                        timeout=20,
                         verify=self.config.verify_ssl,
                     )
                     response.raise_for_status()
@@ -1690,6 +1690,36 @@ def first_non_spam_url(text: str) -> str:
     return ""
 
 
+def first_image_url_from_html(markup: str, base_url: str = "") -> str:
+    if not markup:
+        return ""
+    soup = make_soup(markup, "html.parser")
+    for img in soup.find_all("img"):
+        candidate = image_candidate_from_tag(img, base_url)
+        if candidate:
+            return candidate
+    for url in extract_urls(markup):
+        candidate = safe_url(url, base_url)
+        if looks_like_real_image(candidate):
+            return candidate
+    return ""
+
+
+def wordpress_image_url_for_item(item: FeedItem) -> str:
+    if item.enclosure_url and (
+        normalize_mime(item.enclosure_type).startswith("image/") or looks_like_real_image(item.enclosure_url)
+    ):
+        return item.enclosure_url
+    html_image = first_image_url_from_html(item.html_content, item.source_url or "")
+    if html_image:
+        return html_image
+    for url in extract_urls(item.text):
+        candidate = safe_url(url, item.source_url or "")
+        if looks_like_real_image(candidate):
+            return candidate
+    return ""
+
+
 def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: list[LinkInfo]) -> str:
     raw_text = strip_tags(item.html_content) if item.html_content else item.text
     raw_text = remove_spam_urls_from_text(raw_text)
@@ -1697,11 +1727,12 @@ def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: lis
     body_text = rewritten if fact_safety_check(raw_text, rewritten, is_html=False) else raw_text
     body_html = text_to_html(body_text)
     pieces = [add_digest_heading(body_html, item.title)]
-    if item.enclosure_url and normalize_mime(item.enclosure_type).startswith("image/"):
+    image_url = wordpress_image_url_for_item(item)
+    if image_url:
         pieces.insert(
             0,
             '<figure style="margin:0 0 18px 0; text-align:center;">'
-            f'<img src="{html.escape(item.enclosure_url, quote=True)}" alt="{html.escape(item.title, quote=True)}" '
+            f'<img src="{html.escape(image_url, quote=True)}" alt="{html.escape(item.title, quote=True)}" '
             'style="max-width:100%; height:auto; border-radius:8px;" loading="lazy" decoding="async">'
             "</figure>"
         )
@@ -2017,7 +2048,7 @@ class MirrorBot:
             response = self.session.get(
                 source_url,
                 headers=default_headers(self.config.feed_url),
-                timeout=20,
+                timeout=8,
                 verify=self.config.verify_ssl,
             )
             if response.status_code != 200:
