@@ -8,7 +8,6 @@ import mimetypes
 import os
 import re
 import sqlite3
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,11 +38,6 @@ try:
 except Exception:
     OpenAI = None
 
-try:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
-except Exception:
-    Image = ImageDraw = ImageFont = ImageOps = None
-
 
 LOGGER = logging.getLogger("improved_bot")
 
@@ -62,23 +56,6 @@ IMAGE_ATTRS = (
 )
 BAD_IMAGE_HINTS = ("placeholder", "spacer", "blank.gif", "lazyload", "loading.gif")
 MEDIA_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
-
-BRAND_NAME = os.environ.get("BRAND_NAME", "POSITRON ACADEMY").strip() or "POSITRON ACADEMY"
-BRAND_ADDRESS = (
-    os.environ.get("BRAND_ADDRESS", "चौधरी हॉस्पिटल के पास, पांसल चौराहा, भीलवाड़ा").strip()
-    or "चौधरी हॉस्पिटल के पास, पांसल चौराहा, भीलवाड़ा"
-)
-BRAND_ADDRESS_FALLBACK = "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
-BRAND_CONTACT = os.environ.get("BRAND_CONTACT", "8104894648").strip() or "8104894648"
-BRAND_SKIP_TYPES = {"image/gif", "image/svg+xml"}
-BRAND_TAGLINE = os.environ.get("BRAND_TAGLINE", "Education & Career Updates").strip() or "Education & Career Updates"
-FONT_DOWNLOAD_URLS = {
-    False: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Regular.ttf",
-    True: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Bold.ttf",
-}
-DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
-FONT_SUPPORTS_DEVANAGARI: dict[int, bool] = {}
-FONT_CACHE: dict[tuple[int, bool, bool], Any] = {}
 
 SPAM_TEXT_HINTS = (
     "betting",
@@ -223,11 +200,10 @@ class Config:
     follow_line_tg: str = ""
     follow_line_wa: str = ""
     wp_post_type: str = "pages"
-    wp_timeout: int = 12
-    wp_max_retries: int = 1
+    wp_timeout: int = 25
+    wp_max_retries: int = 2
     wp_referer: str = ""
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
-    create_source_pages: bool = False
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
 
@@ -262,11 +238,10 @@ class Config:
             follow_line_tg=os.environ.get("FOLLOW_LINE_TG", os.environ.get("FOLLOW_LINE", "")).strip(),
             follow_line_wa=os.environ.get("FOLLOW_LINE_WA", "").strip(),
             wp_post_type=post_type,
-            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 12, minimum=5),
-            wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 1, minimum=1),
+            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 25, minimum=5),
+            wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 2, minimum=1),
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
-            create_source_pages=parse_bool(os.environ.get("CREATE_SOURCE_PAGES"), False),
             skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
         )
@@ -908,7 +883,6 @@ class TelegramClient:
         content_type = normalize_mime(content_type)
         if content_type not in MEDIA_IMAGE_TYPES:
             raise ValueError(f"Unsupported image MIME for Telegram photo: {content_type or 'unknown'}")
-        photo_bytes, content_type = brand_image_bytes(photo_bytes, content_type)
         caption = trim_preserving_urls(caption, 900)
         if self.config.dry_run:
             LOGGER.info("[DRY_RUN] Would send photo to %s with caption: %s", chat_id, caption[:200])
@@ -937,7 +911,6 @@ class WordPressClient:
         self.config = config
         self.session = session
         self.upload_cache: dict[str, str] = {}
-        self.media_upload_disabled = False
 
     @property
     def ready(self) -> bool:
@@ -954,26 +927,14 @@ class WordPressClient:
         return f"{self.api_root()}/{resource.strip('/')}"
 
     def api_headers(self, headers: dict[str, str] | None = None) -> dict[str, str]:
-        origin = origin_from_url(self.config.wp_url)
         final_headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/137.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": default_headers()["User-Agent"],
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
-            "Connection": "close",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "Sec-Ch-Ua": '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-            "X-Requested-With": "XMLHttpRequest",
         }
+        origin = origin_from_url(self.config.wp_url)
         if origin:
             final_headers["Origin"] = origin
             final_headers["Referer"] = self.config.wp_referer or f"{origin}/wp-admin/"
@@ -1015,39 +976,18 @@ class WordPressClient:
         if not content_type.startswith("image/"):
             LOGGER.warning("Skipping WordPress upload for non-image media: %s", source_url)
             return ""
-        original_media_bytes = media_bytes
-        original_content_type = content_type
-        media_bytes, content_type = brand_image_bytes(media_bytes, content_type)
         filename = guess_filename(source_url, content_type)
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Type": content_type,
         }
-        try:
-            payload = self.request_json(
-                "POST",
-                self.endpoint("media"),
-                headers=headers,
-                data=media_bytes,
-                timeout=self.config.wp_timeout,
-            )
-        except Exception:
-            if media_bytes == original_media_bytes and content_type == original_content_type:
-                raise
-            LOGGER.warning("Branded image upload failed; retrying original image for %s", source_url)
-            content_type = original_content_type
-            filename = guess_filename(source_url, content_type)
-            headers = {
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Content-Type": content_type,
-            }
-            payload = self.request_json(
-                "POST",
-                self.endpoint("media"),
-                headers=headers,
-                data=original_media_bytes,
-                timeout=self.config.wp_timeout,
-            )
+        payload = self.request_json(
+            "POST",
+            self.endpoint("media"),
+            headers=headers,
+            data=media_bytes,
+            timeout=self.config.wp_timeout,
+        )
         media_url = payload.get("source_url") or payload.get("guid", {}).get("rendered", "")
         media_id = payload.get("id")
         if alt_text and media_id:
@@ -1068,24 +1008,13 @@ class WordPressClient:
         if source_url in self.upload_cache:
             return self.upload_cache[source_url]
         try:
-            response = None
-            errors: list[str] = []
-            for candidate_referer in (referer, "", origin_from_url(source_url)):
-                try:
-                    response = self.session.get(
-                        source_url,
-                        headers=default_headers(candidate_referer),
-                        timeout=20,
-                        verify=self.config.verify_ssl,
-                    )
-                    response.raise_for_status()
-                    break
-                except Exception as exc:
-                    errors.append(str(exc))
-                    response = None
-                    continue
-            if response is None:
-                raise RuntimeError("; ".join(errors[-2:]) or "image download failed")
+            response = self.session.get(
+                source_url,
+                headers=default_headers(referer),
+                timeout=45,
+                verify=self.config.verify_ssl,
+            )
+            response.raise_for_status()
             content_type = normalize_mime(response.headers.get("Content-Type", ""))
             if not content_type.startswith("image/"):
                 guessed = mimetypes.guess_type(source_url)[0] or ""
@@ -1102,9 +1031,7 @@ class WordPressClient:
             self.upload_cache[source_url] = ""
             return ""
 
-    def normalize_images(self, soup_or_tag: Any, base_url: str = "") -> tuple[int, int]:
-        total_images = 0
-        uploaded_images = 0
+    def normalize_images(self, soup_or_tag: Any, base_url: str = "") -> None:
         for source in soup_or_tag.find_all("source"):
             if source.parent and getattr(source.parent, "name", "") == "picture":
                 source.decompose()
@@ -1117,13 +1044,9 @@ class WordPressClient:
             source_url = image_candidate_from_tag(img, base_url)
             if not source_url:
                 continue
-            total_images += 1
             final_url = source_url
             if self.ready:
-                uploaded_url = self.upload_media_from_url(source_url, referer=base_url, alt_text=img.get("alt", ""))
-                if uploaded_url:
-                    final_url = uploaded_url
-                    uploaded_images += 1
+                final_url = self.upload_media_from_url(source_url, referer=base_url, alt_text=img.get("alt", "")) or source_url
             img["src"] = final_url
             img["loading"] = "lazy"
             img["decoding"] = "async"
@@ -1131,9 +1054,8 @@ class WordPressClient:
             for attr in list(img.attrs):
                 if attr.startswith("data-") or attr in {"srcset", "sizes"}:
                     del img[attr]
-        return total_images, uploaded_images
 
-    def publish(self, title: str, content_html: str, base_url: str = "", require_uploaded_image: bool = False) -> str:
+    def publish(self, title: str, content_html: str, base_url: str = "") -> str:
         if not self.ready:
             LOGGER.info("WordPress credentials are not configured; skipping WordPress publish.")
             return ""
@@ -1143,9 +1065,7 @@ class WordPressClient:
 
         soup = make_soup(content_html, "html.parser")
         normalize_links(soup, base_url)
-        total_images, uploaded_images = self.normalize_images(soup, base_url)
-        if require_uploaded_image and total_images > 0 and uploaded_images == 0:
-            raise RuntimeError("Feed image was detected but could not be uploaded to WordPress media; page was not published")
+        self.normalize_images(soup, base_url)
         final_content = str(soup)
         data = {
             "title": title[:180],
@@ -1265,13 +1185,6 @@ def guess_filename(source_url: str, content_type: str = "") -> str:
     guessed_ext = mimetypes.guess_extension(normalize_mime(content_type)) or ""
     if guessed_ext == ".jpe":
         guessed_ext = ".jpg"
-    if guessed_ext:
-        stem, ext = os.path.splitext(filename)
-        expected_exts = {guessed_ext}
-        if guessed_ext == ".jpg":
-            expected_exts.add(".jpeg")
-        if ext and ext.lower() not in expected_exts:
-            filename = f"{stem}{guessed_ext}"
     if "." not in filename and guessed_ext:
         filename += guessed_ext
     if "." not in filename:
@@ -1281,303 +1194,6 @@ def guess_filename(source_url: str, content_type: str = "") -> str:
 
 def normalize_mime(content_type: str | None) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
-
-
-def is_brandable_image_type(content_type: str) -> bool:
-    normalized = normalize_mime(content_type)
-    return normalized.startswith("image/") and normalized not in BRAND_SKIP_TYPES
-
-
-def has_devanagari(text: str) -> bool:
-    return bool(DEVANAGARI_RE.search(text or ""))
-
-
-def likely_devanagari_font(path: str) -> bool:
-    normalized = path.replace("\\", "/").lower()
-    return any(
-        hint in normalized
-        for hint in (
-            "devanagari",
-            "nirmala",
-            "mangal",
-            "lohit",
-            "kalimati",
-            "kokila",
-            "aparajita",
-            "sanskrit",
-        )
-    )
-
-
-def brand_font_candidates(bold: bool, require_devanagari: bool) -> list[tuple[str, bool]]:
-    env_key = "BRAND_FONT_BOLD" if bold else "BRAND_FONT_REGULAR"
-    paths: list[tuple[str, bool]] = []
-    env_path = os.environ.get(env_key, "").strip()
-    if env_path:
-        paths.append((env_path, True))
-
-    font_dir = os.environ.get("BRAND_FONT_DIR", "").strip()
-    if font_dir:
-        filename = "NotoSansDevanagari-Bold.ttf" if bold else "NotoSansDevanagari-Regular.ttf"
-        paths.append((os.path.join(font_dir, filename), True))
-
-    paths.extend(
-        [
-            (r"C:\Windows\Fonts\NirmalaB.ttf" if bold else r"C:\Windows\Fonts\Nirmala.ttf", True),
-            (r"C:\Windows\Fonts\mangal.ttf", True),
-            (r"C:\Windows\Fonts\kokila.ttf", True),
-            ("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf", True),
-            ("/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf", True),
-            ("/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf", True),
-            ("/usr/share/fonts/truetype/lohit-deva/Lohit-Devanagari.ttf", True),
-            ("/usr/share/fonts/truetype/fonts-deva-extra/kalimati.ttf", True),
-            ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", False),
-            ("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", False),
-            (r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf", False),
-        ]
-    )
-    if require_devanagari:
-        paths = [item for item in paths if item[1] or likely_devanagari_font(item[0])]
-    return paths
-
-
-def download_brand_font(bold: bool) -> tuple[str, bool]:
-    font_dir = os.environ.get("BRAND_FONT_DIR", "").strip() or os.path.join(tempfile.gettempdir(), "positron-fonts")
-    filename = "NotoSansDevanagari-Bold.ttf" if bold else "NotoSansDevanagari-Regular.ttf"
-    path = os.path.join(font_dir, filename)
-    if os.path.exists(path):
-        return path, True
-    try:
-        os.makedirs(font_dir, exist_ok=True)
-        response = requests.get(FONT_DOWNLOAD_URLS[bold], timeout=20)
-        response.raise_for_status()
-        if len(response.content) < 10000:
-            raise RuntimeError("downloaded font file is unexpectedly small")
-        with open(path, "wb") as handle:
-            handle.write(response.content)
-        return path, True
-    except Exception as exc:
-        LOGGER.warning("Could not download Hindi font; will use fallback text if needed: %s", exc)
-        return "", False
-
-
-def load_brand_font(size: int, bold: bool = False, require_devanagari: bool = False) -> Any:
-    if ImageFont is None:
-        return None
-    cache_key = (size, bold, require_devanagari)
-    if cache_key in FONT_CACHE:
-        return FONT_CACHE[cache_key]
-
-    candidates = brand_font_candidates(bold, require_devanagari)
-    for path, supports_devanagari in candidates:
-        if path and os.path.exists(path):
-            try:
-                font = ImageFont.truetype(path, size=size)
-                FONT_SUPPORTS_DEVANAGARI[id(font)] = supports_devanagari or likely_devanagari_font(path)
-                FONT_CACHE[cache_key] = font
-                return font
-            except Exception:
-                continue
-    if require_devanagari:
-        path, supports_devanagari = download_brand_font(bold)
-        if path and os.path.exists(path):
-            try:
-                font = ImageFont.truetype(path, size=size)
-                FONT_SUPPORTS_DEVANAGARI[id(font)] = supports_devanagari
-                FONT_CACHE[cache_key] = font
-                return font
-            except Exception:
-                pass
-    font = ImageFont.load_default()
-    FONT_SUPPORTS_DEVANAGARI[id(font)] = False
-    FONT_CACHE[cache_key] = font
-    return font
-
-
-def drawable_brand_text(text: str, draw: Any, font: Any) -> str:
-    if has_devanagari(text) and not FONT_SUPPORTS_DEVANAGARI.get(id(font), False):
-        return BRAND_ADDRESS_FALLBACK if text == BRAND_ADDRESS else text.encode("ascii", "ignore").decode("ascii")
-    try:
-        draw.textbbox((0, 0), text, font=font)
-        return text
-    except UnicodeEncodeError:
-        return BRAND_ADDRESS_FALLBACK if text == BRAND_ADDRESS else text.encode("ascii", "ignore").decode("ascii")
-
-
-def text_size(draw: Any, text: str, font: Any) -> tuple[int, int]:
-    safe_text = drawable_brand_text(text, draw, font)
-    bbox = draw.textbbox((0, 0), safe_text, font=font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-
-def wrap_brand_text(draw: Any, text: str, font: Any, max_width: int) -> list[str]:
-    safe_text = drawable_brand_text(text, draw, font)
-    words = safe_text.split()
-    if not words:
-        return []
-    lines: list[str] = []
-    current = words[0]
-    for word in words[1:]:
-        candidate = f"{current} {word}"
-        if text_size(draw, candidate, font)[0] <= max_width:
-            current = candidate
-        else:
-            lines.append(current)
-            current = word
-    lines.append(current)
-    return lines
-
-
-def draw_centered_text(draw: Any, text: str, font: Any, y: int, max_width: int, fill: tuple[int, int, int, int], x0: int = 0) -> int:
-    lines = wrap_brand_text(draw, text, font, max_width)
-    gap = max(5, int(getattr(font, "size", 16) * 0.18))
-    for line in lines:
-        safe_line = drawable_brand_text(line, draw, font)
-        line_width, line_height = text_size(draw, safe_line, font)
-        x = x0 + max(0, (max_width - line_width) // 2)
-        draw.text((x + 1, y + 1), safe_line, font=font, fill=(0, 0, 0, 80))
-        draw.text((x, y), safe_line, font=font, fill=fill)
-        y += line_height + gap
-    return y
-
-
-def fit_inside(size: tuple[int, int], box: tuple[int, int]) -> tuple[int, int]:
-    width, height = size
-    max_width, max_height = box
-    scale = min(max_width / width, max_height / height)
-    return max(1, int(width * scale)), max(1, int(height * scale))
-
-
-def rounded_image(image: Any, radius: int) -> Any:
-    mask = Image.new("L", image.size, 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.rounded_rectangle((0, 0, image.size[0], image.size[1]), radius=radius, fill=255)
-    output = Image.new("RGBA", image.size, (255, 255, 255, 0))
-    output.paste(image, (0, 0), mask)
-    return output
-
-
-def brand_image_bytes(media_bytes: bytes, content_type: str) -> tuple[bytes, str]:
-    content_type = normalize_mime(content_type) or "image/jpeg"
-    if not media_bytes or not is_brandable_image_type(content_type):
-        return media_bytes, content_type
-    if Image is None or ImageDraw is None or ImageFont is None or ImageOps is None:
-        LOGGER.warning("Pillow is not installed; image branding skipped.")
-        return media_bytes, content_type
-
-    try:
-        with Image.open(io.BytesIO(media_bytes)) as opened:
-            source = ImageOps.exif_transpose(opened).convert("RGBA")
-
-        width, height = source.size
-        if width < 160 or height < 120:
-            return media_bytes, content_type
-
-        if height > width * 1.2:
-            canvas_w, canvas_h = 1080, 1350
-        else:
-            canvas_w, canvas_h = 1280, 900
-        margin = max(44, canvas_w // 24)
-        header_h = max(128, canvas_h // 6)
-        footer_h = max(150, canvas_h // 6)
-        body_top = header_h + max(24, canvas_h // 36)
-        body_bottom = canvas_h - footer_h - max(24, canvas_h // 36)
-        body_h = body_bottom - body_top
-        body_w = canvas_w - (margin * 2)
-
-        branded = Image.new("RGBA", (canvas_w, canvas_h), (239, 244, 247, 255))
-        draw = ImageDraw.Draw(branded)
-        draw.rectangle((0, 0, canvas_w, canvas_h), fill=(239, 244, 247, 255))
-        draw.rectangle((0, 0, canvas_w, header_h), fill=(14, 35, 48, 255))
-        draw.rectangle((0, header_h - 8, canvas_w, header_h), fill=(247, 186, 45, 255))
-        draw.rectangle((0, canvas_h - footer_h, canvas_w, canvas_h), fill=(14, 35, 48, 255))
-        draw.rectangle((0, canvas_h - footer_h, canvas_w, canvas_h - footer_h + 6), fill=(247, 186, 45, 255))
-
-        title_font = load_brand_font(max(46, canvas_w // 18), bold=True)
-        tagline_font = load_brand_font(max(22, canvas_w // 48), bold=False)
-        info_font = load_brand_font(max(22, canvas_w // 48), bold=False, require_devanagari=True)
-        contact_font = load_brand_font(max(26, canvas_w // 42), bold=True, require_devanagari=False)
-
-        title_y = max(24, header_h // 5)
-        title_y = draw_centered_text(draw, BRAND_NAME, title_font, title_y, canvas_w - (margin * 2), (255, 214, 85, 255), margin)
-        draw_centered_text(draw, BRAND_TAGLINE, tagline_font, title_y + 6, canvas_w - (margin * 2), (235, 248, 255, 245), margin)
-
-        panel_radius = 24
-        shadow_offset = max(8, canvas_w // 140)
-        draw.rounded_rectangle(
-            (margin + shadow_offset, body_top + shadow_offset, margin + body_w + shadow_offset, body_top + body_h + shadow_offset),
-            radius=panel_radius,
-            fill=(24, 35, 42, 48),
-        )
-        draw.rounded_rectangle(
-            (margin, body_top, margin + body_w, body_top + body_h),
-            radius=panel_radius,
-            fill=(255, 255, 255, 255),
-            outline=(215, 224, 229, 255),
-            width=2,
-        )
-
-        image_pad = max(22, canvas_w // 46)
-        content_box = (body_w - image_pad * 2, body_h - image_pad * 2)
-        fitted = fit_inside(source.size, content_box)
-        resample = getattr(Image, "Resampling", Image).LANCZOS
-        resized = source.resize(fitted, resample)
-        framed = rounded_image(resized, max(12, canvas_w // 80))
-        image_x = margin + image_pad + max(0, (content_box[0] - fitted[0]) // 2)
-        image_y = body_top + image_pad + max(0, (content_box[1] - fitted[1]) // 2)
-        draw.rounded_rectangle(
-            (image_x - 6, image_y - 6, image_x + fitted[0] + 6, image_y + fitted[1] + 6),
-            radius=max(14, canvas_w // 70),
-            fill=(246, 249, 251, 255),
-            outline=(18, 44, 58, 55),
-            width=2,
-        )
-        branded.alpha_composite(framed, (image_x, image_y))
-
-        footer_top = canvas_h - footer_h
-        address_y = footer_top + max(22, footer_h // 6)
-        next_y = draw_centered_text(
-            draw,
-            BRAND_ADDRESS,
-            info_font,
-            address_y,
-            canvas_w - (margin * 2),
-            (255, 255, 255, 245),
-            margin,
-        )
-        contact_text = f"CONTACT : {BRAND_CONTACT}"
-        contact_width, contact_height = text_size(draw, contact_text, contact_font)
-        pill_pad_x = max(22, canvas_w // 48)
-        pill_pad_y = max(8, canvas_h // 120)
-        pill_w = min(canvas_w - (margin * 2), contact_width + pill_pad_x * 2)
-        pill_h = contact_height + pill_pad_y * 2
-        pill_x = (canvas_w - pill_w) // 2
-        pill_y = min(canvas_h - pill_h - max(14, footer_h // 12), next_y + max(8, footer_h // 18))
-        draw.rounded_rectangle(
-            (pill_x, pill_y, pill_x + pill_w, pill_y + pill_h),
-            radius=max(12, pill_h // 2),
-            fill=(247, 186, 45, 255),
-        )
-        safe_contact = drawable_brand_text(contact_text, draw, contact_font)
-        contact_bbox = draw.textbbox((0, 0), safe_contact, font=contact_font)
-        contact_width = contact_bbox[2] - contact_bbox[0]
-        contact_height = contact_bbox[3] - contact_bbox[1]
-        draw.text(
-            (
-                pill_x + max(0, (pill_w - contact_width) // 2) - contact_bbox[0],
-                pill_y + max(0, (pill_h - contact_height) // 2) - contact_bbox[1],
-            ),
-            safe_contact,
-            font=contact_font,
-            fill=(14, 35, 48, 255),
-        )
-
-        output = io.BytesIO()
-        branded.convert("RGB").save(output, format="JPEG", quality=93, optimize=True)
-        return output.getvalue(), "image/jpeg"
-    except Exception as exc:
-        LOGGER.warning("Image branding failed; using original image. Error: %s", exc)
-        return media_bytes, content_type
 
 
 def sanitize_pdf_remove_links(pdf_bytes: bytes) -> bytes:
@@ -1701,69 +1317,19 @@ def first_non_spam_url(text: str) -> str:
     return ""
 
 
-def first_image_url_from_html(markup: str, base_url: str = "") -> str:
-    if not markup:
-        return ""
-    soup = make_soup(markup, "html.parser")
-    for img in soup.find_all("img"):
-        candidate = image_candidate_from_tag(img, base_url)
-        if candidate:
-            return candidate
-    for url in extract_urls(markup):
-        candidate = safe_url(url, base_url)
-        if looks_like_real_image(candidate):
-            return candidate
-    return ""
-
-
-def primary_image_url_from_soup(soup: Any, base_url: str = "") -> str:
-    for attr_name, attr_value in (
-        ("property", "og:image"),
-        ("property", "og:image:url"),
-        ("name", "twitter:image"),
-        ("name", "twitter:image:src"),
-    ):
-        meta = soup.find("meta", attrs={attr_name: attr_value})
-        if meta and meta.get("content"):
-            candidate = safe_url(meta.get("content"), base_url)
-            if looks_like_real_image(candidate):
-                return candidate
-    for img in soup.find_all("img"):
-        candidate = image_candidate_from_tag(img, base_url)
-        if candidate:
-            return candidate
-    return ""
-
-
-def wordpress_image_url_for_item(item: FeedItem, source_html: str = "", source_hosts: Iterable[str] = DEFAULT_SOURCE_PAGE_HOSTS) -> str:
-    if not item.source_url or not host_matches(item.source_url, source_hosts):
-        return ""
-    return first_image_url_from_html(source_html, item.source_url)
-
-
-def build_wordpress_content(
-    item: FeedItem,
-    ai: AIRewriter,
-    important_links: list[LinkInfo],
-    source_html: str = "",
-    source_hosts: Iterable[str] = DEFAULT_SOURCE_PAGE_HOSTS,
-) -> str:
-    raw_text = strip_tags(item.html_content) if item.html_content else item.text
-    raw_text = remove_spam_urls_from_text(raw_text)
-    rewritten = ai.rewrite_plain(raw_text)
-    body_text = rewritten if fact_safety_check(raw_text, rewritten, is_html=False) else raw_text
-    body_html = text_to_html(body_text)
-    pieces = [add_digest_heading(body_html, item.title)]
-    image_url = wordpress_image_url_for_item(item, source_html, source_hosts)
-    if image_url:
-        pieces.insert(
-            0,
-            '<figure style="margin:0 0 18px 0; text-align:center;">'
-            f'<img src="{html.escape(image_url, quote=True)}" alt="{html.escape(item.title, quote=True)}" '
-            'style="max-width:100%; height:auto; border-radius:8px;" loading="lazy" decoding="async">'
+def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: list[LinkInfo]) -> str:
+    raw_html = item.html_content or text_to_html(item.text)
+    cleaned_html = sanitize_html_content(raw_html, item.source_url or "")
+    cleaned_html = add_digest_heading(cleaned_html, item.title)
+    cleaned_html = ai.rewrite_html(cleaned_html)
+    pieces = [cleaned_html, source_block(item.source_url), important_links_block(important_links)]
+    if item.enclosure_url and normalize_mime(item.enclosure_type).startswith("image/"):
+        pieces.append(
+            "<figure>"
+            f'<img src="{html.escape(item.enclosure_url, quote=True)}" alt="{html.escape(item.title, quote=True)}" '
+            'style="max-width:100%; height:auto;" loading="lazy" decoding="async">'
             "</figure>"
         )
-    pieces.extend([source_block(item.source_url), important_links_block(important_links)])
     return "\n".join(piece for piece in pieces if piece)
 
 
@@ -1775,11 +1341,11 @@ def build_source_page_content(
     ai: AIRewriter,
     important_links: list[LinkInfo],
 ) -> str:
-    raw_text = strip_tags(source_html) if source_html else fallback_text
-    raw_text = remove_spam_urls_from_text(raw_text)
-    rewritten = ai.rewrite_plain(raw_text)
-    body_text = rewritten if fact_safety_check(raw_text, rewritten, is_html=False) else raw_text
-    pieces = [add_digest_heading(text_to_html(body_text), title), source_block(source_url), important_links_block(important_links)]
+    raw_html = source_html or text_to_html(fallback_text)
+    cleaned_html = sanitize_html_content(raw_html, source_url)
+    cleaned_html = add_digest_heading(cleaned_html, title)
+    cleaned_html = ai.rewrite_html(cleaned_html)
+    pieces = [cleaned_html, source_block(source_url), important_links_block(important_links)]
     return "\n".join(piece for piece in pieces if piece)
 
 
@@ -1892,7 +1458,6 @@ class MirrorBot:
         self.state = StateStore(config.db_file)
         self.telegram = TelegramClient(config, self.session)
         self.wordpress = WordPressClient(config, self.session)
-        self.wordpress_disabled = False
         self.ai = AIRewriter(config)
 
     def close(self) -> None:
@@ -1919,9 +1484,6 @@ class MirrorBot:
             return
         LOGGER.info("Processing %s item(s).", len(selected))
         for item in reversed(selected):
-            if self.wordpress_disabled:
-                LOGGER.warning("WordPress is unavailable; stopping run before Telegram dispatch.")
-                break
             self.process_one(item)
             time.sleep(2)
 
@@ -1975,42 +1537,26 @@ class MirrorBot:
             row = self.state.get(item.guid)
             wp_link = row["wp_link"] if row and row["wp_link"] else ""
 
-            if not self.wordpress.ready:
-                raise RuntimeError("WordPress credentials are required before sending Telegram messages")
-
-            source_replacements: dict[str, str] = {}
-            if self.config.create_source_pages:
-                source_replacements = self.create_source_pages(
-                    item,
-                    existing_wp_link=wp_link,
-                    initial_source_html=source_page_html,
-                    initial_page_links=page_links,
-                )
+            source_replacements = self.create_source_pages(
+                item,
+                existing_wp_link=wp_link,
+                initial_source_html=source_page_html,
+                initial_page_links=page_links,
+            )
             if source_replacements:
                 item.text = apply_link_replacements_text(item.text, source_replacements)
                 item.html_content = apply_link_replacements_html(item.html_content, source_replacements, item.source_url)
-
-            if not wp_link:
-                wp_content = build_wordpress_content(
-                    item,
-                    self.ai,
-                    important_links,
-                    source_html=source_page_html,
-                    source_hosts=self.config.source_page_hosts,
-                )
-                require_uploaded_image = bool(
-                    wordpress_image_url_for_item(item, source_page_html, self.config.source_page_hosts)
-                )
-                wp_link = self.wordpress.publish(
-                    item.title,
-                    wp_content,
-                    item.source_url or self.config.feed_url,
-                    require_uploaded_image=require_uploaded_image,
-                )
+                wp_link = wp_link or next(iter(source_replacements.values()))
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
-            if not wp_link:
-                raise RuntimeError("WordPress publish did not return a link; Telegram message was not sent")
+
+            if self.wordpress.ready and not wp_link:
+                wp_content = build_wordpress_content(item, self.ai, important_links)
+                wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
+                if not wp_link and not self.config.dry_run:
+                    raise RuntimeError("WordPress publish did not return a link")
+                if wp_link:
+                    self.state.set_wp_link(item.guid, wp_link)
 
             if self.config.dry_run:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])
@@ -2022,8 +1568,6 @@ class MirrorBot:
             LOGGER.info("Published item: %s", item.title[:100])
         except Exception as exc:
             error = str(exc)
-            if "WordPress API failed" in error or "positronacademy.in" in error:
-                self.wordpress_disabled = True
             self.state.mark_failed(item.guid, error)
             LOGGER.error("Item failed: %s | %s", item.title[:100], error)
 
@@ -2093,7 +1637,7 @@ class MirrorBot:
             response = self.session.get(
                 source_url,
                 headers=default_headers(self.config.feed_url),
-                timeout=12,
+                timeout=20,
                 verify=self.config.verify_ssl,
             )
             if response.status_code != 200:
@@ -2102,22 +1646,13 @@ class MirrorBot:
                 return "", []
             soup = make_soup(response.text, "html.parser")
             normalize_links(soup, source_url)
-            primary_image = primary_image_url_from_soup(soup, source_url)
             links = extract_important_links(str(soup), source_url)
             clean_layout_noise(soup)
             article = select_article(soup)
             if not article:
-                if primary_image:
-                    return f'<figure><img src="{html.escape(primary_image, quote=True)}" alt=""></figure>', links
                 return "", links
             normalize_links(article, source_url)
-            cleaned = sanitize_html_content(str(article), source_url)
-            if primary_image and not first_image_url_from_html(cleaned, source_url):
-                cleaned = (
-                    f'<figure><img src="{html.escape(primary_image, quote=True)}" alt=""></figure>\n'
-                    f"{cleaned}"
-                )
-            return cleaned, links
+            return sanitize_html_content(str(article), source_url), links
         except Exception as exc:
             LOGGER.warning("Source context fetch failed for %s: %s", source_url, exc)
             return "", []
