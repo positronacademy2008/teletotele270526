@@ -223,8 +223,8 @@ class Config:
     follow_line_tg: str = ""
     follow_line_wa: str = ""
     wp_post_type: str = "pages"
-    wp_timeout: int = 30
-    wp_max_retries: int = 2
+    wp_timeout: int = 12
+    wp_max_retries: int = 1
     wp_referer: str = ""
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
@@ -261,8 +261,8 @@ class Config:
             follow_line_tg=os.environ.get("FOLLOW_LINE_TG", os.environ.get("FOLLOW_LINE", "")).strip(),
             follow_line_wa=os.environ.get("FOLLOW_LINE_WA", "").strip(),
             wp_post_type=post_type,
-            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 30, minimum=5),
-            wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 2, minimum=1),
+            wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 12, minimum=5),
+            wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 1, minimum=1),
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
             skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
@@ -1892,6 +1892,9 @@ class MirrorBot:
             return
         LOGGER.info("Processing %s item(s).", len(selected))
         for item in reversed(selected):
+            if self.wordpress_disabled:
+                LOGGER.warning("WordPress is unavailable; stopping run before Telegram dispatch.")
+                break
             self.process_one(item)
             time.sleep(2)
 
@@ -1979,6 +1982,8 @@ class MirrorBot:
             LOGGER.info("Published item: %s", item.title[:100])
         except Exception as exc:
             error = str(exc)
+            if "WordPress API failed" in error or "positronacademy.in" in error:
+                self.wordpress_disabled = True
             self.state.mark_failed(item.guid, error)
             LOGGER.error("Item failed: %s | %s", item.title[:100], error)
 
