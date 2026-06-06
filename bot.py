@@ -72,6 +72,10 @@ SPAM_TEXT_HINTS = (
 )
 HARD_SKIP_PHRASES = ("शिक्षा विभाग समाचार",)
 DEFAULT_SOURCE_PAGE_HOSTS = ("indianaukrihelp.com",)
+DEFAULT_PROTECTED_IMAGE_HOSTS = (
+    "tg.i-c-a.su",
+    "cdn4.cdn-telegram.org",
+)
 SPAM_HOST_HINTS = (
     "1xbet",
     "bet365",
@@ -193,8 +197,9 @@ class Config:
     groq_api_key: str = ""
     admin_chat_id: str = ""
     db_file: str = "bot_state.sqlite3"
-    max_items_per_run: int = 10
+    max_items_per_run: int = 5
     max_retries: int = 3
+    max_run_seconds: int = 240
     allow_insecure_ssl: bool = False
     dry_run: bool = False
     follow_line_tg: str = ""
@@ -203,9 +208,14 @@ class Config:
     wp_timeout: int = 25
     wp_max_retries: int = 2
     wp_referer: str = ""
+    wp_upload_media: bool = False
+    wp_remove_blocked_images: bool = True
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
+    max_source_pages_per_item: int = 1
+    protected_image_hosts: tuple[str, ...] = DEFAULT_PROTECTED_IMAGE_HOSTS
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
+    groq_timeout: int = 20
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -231,8 +241,9 @@ class Config:
             groq_api_key=os.environ.get("GROQ_API_KEY", "").strip(),
             admin_chat_id=os.environ.get("ADMIN_CHAT_ID", "").strip(),
             db_file=os.environ.get("DB_FILE", "bot_state.sqlite3").strip() or "bot_state.sqlite3",
-            max_items_per_run=parse_int(os.environ.get("MAX_ITEMS_PER_RUN"), 10, minimum=1),
+            max_items_per_run=parse_int(os.environ.get("MAX_ITEMS_PER_RUN"), 5, minimum=1),
             max_retries=parse_int(os.environ.get("MAX_RETRIES"), 3, minimum=0),
+            max_run_seconds=parse_int(os.environ.get("MAX_RUN_SECONDS"), 240, minimum=0),
             allow_insecure_ssl=parse_bool(os.environ.get("ALLOW_INSECURE_SSL"), False),
             dry_run=parse_bool(os.environ.get("DRY_RUN"), False),
             follow_line_tg=os.environ.get("FOLLOW_LINE_TG", os.environ.get("FOLLOW_LINE", "")).strip(),
@@ -241,9 +252,17 @@ class Config:
             wp_timeout=parse_int(os.environ.get("WP_TIMEOUT"), 25, minimum=5),
             wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 2, minimum=1),
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
+            wp_upload_media=parse_bool(os.environ.get("WP_UPLOAD_MEDIA"), False),
+            wp_remove_blocked_images=parse_bool(os.environ.get("WP_REMOVE_BLOCKED_IMAGES"), True),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
+            max_source_pages_per_item=parse_int(os.environ.get("MAX_SOURCE_PAGES_PER_ITEM"), 1, minimum=0),
+            protected_image_hosts=parse_csv_tuple(
+                os.environ.get("PROTECTED_IMAGE_HOSTS"),
+                DEFAULT_PROTECTED_IMAGE_HOSTS,
+            ),
             skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
+            groq_timeout=parse_int(os.environ.get("GROQ_TIMEOUT"), 20, minimum=5),
         )
 
     @property
@@ -312,6 +331,21 @@ def origin_from_url(url: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return ""
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def hostname_from_url(url: str) -> str:
+    parsed = urlparse(url or "")
+    return (parsed.hostname or "").lower().removeprefix("www.")
+
+
+def same_hostname(left_url: str, right_url: str) -> bool:
+    left = hostname_from_url(left_url)
+    right = hostname_from_url(right_url)
+    return bool(left and right and left == right)
+
+
+def referer_for_download(source_url: str, referer: str = "") -> str:
+    return referer if referer and same_hostname(source_url, referer) else ""
 
 
 def make_soup(markup: str, parser: str = "html.parser") -> Any:
@@ -911,6 +945,7 @@ class WordPressClient:
         self.config = config
         self.session = session
         self.upload_cache: dict[str, str] = {}
+        self.media_upload_available = config.wp_upload_media
 
     @property
     def ready(self) -> bool:
@@ -972,6 +1007,8 @@ class WordPressClient:
     def upload_media_bytes(self, media_bytes: bytes, source_url: str, content_type: str, alt_text: str = "") -> str:
         if not self.ready:
             return ""
+        if not self.media_upload_available:
+            return ""
         content_type = normalize_mime(content_type) or mimetypes.guess_type(source_url)[0] or "image/jpeg"
         if not content_type.startswith("image/"):
             LOGGER.warning("Skipping WordPress upload for non-image media: %s", source_url)
@@ -981,13 +1018,23 @@ class WordPressClient:
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Type": content_type,
         }
-        payload = self.request_json(
-            "POST",
-            self.endpoint("media"),
-            headers=headers,
-            data=media_bytes,
-            timeout=self.config.wp_timeout,
-        )
+        try:
+            payload = self.request_json(
+                "POST",
+                self.endpoint("media"),
+                headers=headers,
+                data=media_bytes,
+                timeout=self.config.wp_timeout,
+            )
+        except RuntimeError as exc:
+            error = str(exc)
+            if "HTTP 406" in error or "Mod_Security" in error:
+                self.media_upload_available = False
+                LOGGER.warning(
+                    "WordPress media upload is blocked by ModSecurity; skipping media uploads for this run. "
+                    "Set WP_UPLOAD_MEDIA=false or whitelist /wp-json/wp/v2/media on your own site."
+                )
+            raise
         media_url = payload.get("source_url") or payload.get("guid", {}).get("rendered", "")
         media_id = payload.get("id")
         if alt_text and media_id:
@@ -1007,13 +1054,24 @@ class WordPressClient:
             return ""
         if source_url in self.upload_cache:
             return self.upload_cache[source_url]
+        if not self.media_upload_available:
+            self.upload_cache[source_url] = ""
+            return ""
         try:
+            headers = default_headers(referer_for_download(source_url, referer))
             response = self.session.get(
                 source_url,
-                headers=default_headers(referer),
+                headers=headers,
                 timeout=45,
                 verify=self.config.verify_ssl,
             )
+            if response.status_code == 403 and "Referer" in headers and "referer" in response.text.lower():
+                response = self.session.get(
+                    source_url,
+                    headers=default_headers(),
+                    timeout=45,
+                    verify=self.config.verify_ssl,
+                )
             response.raise_for_status()
             content_type = normalize_mime(response.headers.get("Content-Type", ""))
             if not content_type.startswith("image/"):
@@ -1031,6 +1089,9 @@ class WordPressClient:
             self.upload_cache[source_url] = ""
             return ""
 
+    def is_protected_image_url(self, url: str) -> bool:
+        return host_matches(url, self.config.protected_image_hosts)
+
     def normalize_images(self, soup_or_tag: Any, base_url: str = "") -> None:
         for source in soup_or_tag.find_all("source"):
             if source.parent and getattr(source.parent, "name", "") == "picture":
@@ -1045,8 +1106,15 @@ class WordPressClient:
             if not source_url:
                 continue
             final_url = source_url
-            if self.ready:
-                final_url = self.upload_media_from_url(source_url, referer=base_url, alt_text=img.get("alt", "")) or source_url
+            uploaded_url = ""
+            if self.ready and self.media_upload_available:
+                uploaded_url = self.upload_media_from_url(source_url, referer=base_url, alt_text=img.get("alt", ""))
+            if uploaded_url:
+                final_url = uploaded_url
+            elif self.config.wp_remove_blocked_images and self.is_protected_image_url(source_url):
+                container = img.parent if getattr(img.parent, "name", "") in {"figure", "picture"} else img
+                container.decompose()
+                continue
             img["src"] = final_url
             img["loading"] = "lazy"
             img["decoding"] = "async"
@@ -1088,16 +1156,22 @@ class AIRewriter:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.client: Any = None
+        self.disabled_reason = ""
         if not config.groq_api_key:
             return
         if OpenAI is None:
             LOGGER.warning("GROQ_API_KEY is set but openai package is missing; AI rewriting disabled.")
             return
-        self.client = OpenAI(api_key=config.groq_api_key, base_url="https://api.groq.com/openai/v1")
+        self.client = OpenAI(
+            api_key=config.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+            max_retries=0,
+            timeout=float(config.groq_timeout),
+        )
 
     @property
     def enabled(self) -> bool:
-        return self.client is not None
+        return self.client is not None and not self.disabled_reason
 
     def rewrite_plain(self, source_text: str) -> str:
         return self._rewrite(
@@ -1124,7 +1198,7 @@ class AIRewriter:
                     {"role": "user", "content": f"{instruction}\n\n{source[:8000]}"},
                 ],
                 temperature=0.25 if is_html else 0.4,
-                timeout=45.0,
+                timeout=float(self.config.groq_timeout),
             )
             result = response.choices[0].message.content or ""
             result = strip_markdown_fence(result)
@@ -1133,6 +1207,12 @@ class AIRewriter:
                 return source
             return result
         except Exception as exc:
+            error = str(exc)
+            lower_error = error.lower()
+            if "429" in lower_error or "rate limit" in lower_error or "too many requests" in lower_error:
+                self.disabled_reason = "rate limited"
+                LOGGER.warning("AI rewriting is rate-limited; disabling AI rewriting for the rest of this run.")
+                return source
             LOGGER.warning("AI rewriting failed; using cleaned original content. Error: %s", exc)
             return source
 
@@ -1459,6 +1539,7 @@ class MirrorBot:
         self.telegram = TelegramClient(config, self.session)
         self.wordpress = WordPressClient(config, self.session)
         self.ai = AIRewriter(config)
+        self.started_at = time.monotonic()
 
     def close(self) -> None:
         self.state.close()
@@ -1484,8 +1565,18 @@ class MirrorBot:
             return
         LOGGER.info("Processing %s item(s).", len(selected))
         for item in reversed(selected):
+            if self.time_budget_exceeded(reserve_seconds=45):
+                LOGGER.warning("Stopping before next item to stay inside MAX_RUN_SECONDS=%s.", self.config.max_run_seconds)
+                break
             self.process_one(item)
-            time.sleep(2)
+            if not self.time_budget_exceeded(reserve_seconds=2):
+                time.sleep(2)
+
+    def time_budget_exceeded(self, reserve_seconds: int = 0) -> bool:
+        if self.config.max_run_seconds <= 0:
+            return False
+        elapsed = time.monotonic() - self.started_at
+        return elapsed + reserve_seconds >= self.config.max_run_seconds
 
     def select_items(self, items: list[FeedItem]) -> list[FeedItem]:
         selected: list[FeedItem] = []
@@ -1594,6 +1685,9 @@ class MirrorBot:
         initial_page_links: list[LinkInfo] | None = None,
     ) -> dict[str, str]:
         source_urls = self.source_page_urls_from_item(item)
+        if self.config.max_source_pages_per_item <= 0:
+            return {}
+        source_urls = source_urls[: self.config.max_source_pages_per_item]
         if not source_urls:
             return {}
         if not self.wordpress.ready:
@@ -1603,6 +1697,9 @@ class MirrorBot:
 
         replacements: dict[str, str] = {}
         for source_url in source_urls:
+            if self.time_budget_exceeded(reserve_seconds=35):
+                LOGGER.warning("Stopping source-page creation to stay inside MAX_RUN_SECONDS=%s.", self.config.max_run_seconds)
+                break
             LOGGER.info("Creating transparent source page for %s", source_url)
             if canonical_url(source_url) == canonical_url(item.source_url):
                 source_html = initial_source_html
