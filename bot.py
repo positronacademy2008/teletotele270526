@@ -1716,29 +1716,45 @@ def first_image_url_from_html(markup: str, base_url: str = "") -> str:
     return ""
 
 
-def wordpress_image_url_for_item(item: FeedItem) -> str:
-    if item.enclosure_url and (
-        normalize_mime(item.enclosure_type).startswith("image/") or looks_like_real_image(item.enclosure_url)
+def primary_image_url_from_soup(soup: Any, base_url: str = "") -> str:
+    for attr_name, attr_value in (
+        ("property", "og:image"),
+        ("property", "og:image:url"),
+        ("name", "twitter:image"),
+        ("name", "twitter:image:src"),
     ):
-        return item.enclosure_url
-    html_image = first_image_url_from_html(item.html_content, item.source_url or "")
-    if html_image:
-        return html_image
-    for url in extract_urls(item.text):
-        candidate = safe_url(url, item.source_url or "")
-        if looks_like_real_image(candidate):
+        meta = soup.find("meta", attrs={attr_name: attr_value})
+        if meta and meta.get("content"):
+            candidate = safe_url(meta.get("content"), base_url)
+            if looks_like_real_image(candidate):
+                return candidate
+    for img in soup.find_all("img"):
+        candidate = image_candidate_from_tag(img, base_url)
+        if candidate:
             return candidate
     return ""
 
 
-def build_wordpress_content(item: FeedItem, ai: AIRewriter, important_links: list[LinkInfo]) -> str:
+def wordpress_image_url_for_item(item: FeedItem, source_html: str = "", source_hosts: Iterable[str] = DEFAULT_SOURCE_PAGE_HOSTS) -> str:
+    if not item.source_url or not host_matches(item.source_url, source_hosts):
+        return ""
+    return first_image_url_from_html(source_html, item.source_url)
+
+
+def build_wordpress_content(
+    item: FeedItem,
+    ai: AIRewriter,
+    important_links: list[LinkInfo],
+    source_html: str = "",
+    source_hosts: Iterable[str] = DEFAULT_SOURCE_PAGE_HOSTS,
+) -> str:
     raw_text = strip_tags(item.html_content) if item.html_content else item.text
     raw_text = remove_spam_urls_from_text(raw_text)
     rewritten = ai.rewrite_plain(raw_text)
     body_text = rewritten if fact_safety_check(raw_text, rewritten, is_html=False) else raw_text
     body_html = text_to_html(body_text)
     pieces = [add_digest_heading(body_html, item.title)]
-    image_url = wordpress_image_url_for_item(item)
+    image_url = wordpress_image_url_for_item(item, source_html, source_hosts)
     if image_url:
         pieces.insert(
             0,
@@ -1975,8 +1991,16 @@ class MirrorBot:
                 item.html_content = apply_link_replacements_html(item.html_content, source_replacements, item.source_url)
 
             if not wp_link:
-                wp_content = build_wordpress_content(item, self.ai, important_links)
-                require_uploaded_image = bool(wordpress_image_url_for_item(item))
+                wp_content = build_wordpress_content(
+                    item,
+                    self.ai,
+                    important_links,
+                    source_html=source_page_html,
+                    source_hosts=self.config.source_page_hosts,
+                )
+                require_uploaded_image = bool(
+                    wordpress_image_url_for_item(item, source_page_html, self.config.source_page_hosts)
+                )
                 wp_link = self.wordpress.publish(
                     item.title,
                     wp_content,
@@ -2069,7 +2093,7 @@ class MirrorBot:
             response = self.session.get(
                 source_url,
                 headers=default_headers(self.config.feed_url),
-                timeout=8,
+                timeout=12,
                 verify=self.config.verify_ssl,
             )
             if response.status_code != 200:
@@ -2078,13 +2102,22 @@ class MirrorBot:
                 return "", []
             soup = make_soup(response.text, "html.parser")
             normalize_links(soup, source_url)
+            primary_image = primary_image_url_from_soup(soup, source_url)
             links = extract_important_links(str(soup), source_url)
             clean_layout_noise(soup)
             article = select_article(soup)
             if not article:
+                if primary_image:
+                    return f'<figure><img src="{html.escape(primary_image, quote=True)}" alt=""></figure>', links
                 return "", links
             normalize_links(article, source_url)
-            return sanitize_html_content(str(article), source_url), links
+            cleaned = sanitize_html_content(str(article), source_url)
+            if primary_image and not first_image_url_from_html(cleaned, source_url):
+                cleaned = (
+                    f'<figure><img src="{html.escape(primary_image, quote=True)}" alt=""></figure>\n'
+                    f"{cleaned}"
+                )
+            return cleaned, links
         except Exception as exc:
             LOGGER.warning("Source context fetch failed for %s: %s", source_url, exc)
             return "", []
