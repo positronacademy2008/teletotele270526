@@ -227,6 +227,7 @@ class Config:
     wp_max_retries: int = 1
     wp_referer: str = ""
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
+    create_source_pages: bool = False
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
 
@@ -265,6 +266,7 @@ class Config:
             wp_max_retries=parse_int(os.environ.get("WP_MAX_RETRIES"), 1, minimum=1),
             wp_referer=os.environ.get("WP_REFERER", "").strip(),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
+            create_source_pages=parse_bool(os.environ.get("CREATE_SOURCE_PAGES"), False),
             skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
         )
@@ -1100,7 +1102,9 @@ class WordPressClient:
             self.upload_cache[source_url] = ""
             return ""
 
-    def normalize_images(self, soup_or_tag: Any, base_url: str = "") -> None:
+    def normalize_images(self, soup_or_tag: Any, base_url: str = "") -> tuple[int, int]:
+        total_images = 0
+        uploaded_images = 0
         for source in soup_or_tag.find_all("source"):
             if source.parent and getattr(source.parent, "name", "") == "picture":
                 source.decompose()
@@ -1113,9 +1117,13 @@ class WordPressClient:
             source_url = image_candidate_from_tag(img, base_url)
             if not source_url:
                 continue
+            total_images += 1
             final_url = source_url
             if self.ready:
-                final_url = self.upload_media_from_url(source_url, referer=base_url, alt_text=img.get("alt", "")) or source_url
+                uploaded_url = self.upload_media_from_url(source_url, referer=base_url, alt_text=img.get("alt", ""))
+                if uploaded_url:
+                    final_url = uploaded_url
+                    uploaded_images += 1
             img["src"] = final_url
             img["loading"] = "lazy"
             img["decoding"] = "async"
@@ -1123,8 +1131,9 @@ class WordPressClient:
             for attr in list(img.attrs):
                 if attr.startswith("data-") or attr in {"srcset", "sizes"}:
                     del img[attr]
+        return total_images, uploaded_images
 
-    def publish(self, title: str, content_html: str, base_url: str = "") -> str:
+    def publish(self, title: str, content_html: str, base_url: str = "", require_uploaded_image: bool = False) -> str:
         if not self.ready:
             LOGGER.info("WordPress credentials are not configured; skipping WordPress publish.")
             return ""
@@ -1134,7 +1143,9 @@ class WordPressClient:
 
         soup = make_soup(content_html, "html.parser")
         normalize_links(soup, base_url)
-        self.normalize_images(soup, base_url)
+        total_images, uploaded_images = self.normalize_images(soup, base_url)
+        if require_uploaded_image and total_images > 0 and uploaded_images == 0:
+            raise RuntimeError("Feed image was detected but could not be uploaded to WordPress media; page was not published")
         final_content = str(soup)
         data = {
             "title": title[:180],
@@ -1951,22 +1962,27 @@ class MirrorBot:
             if not self.wordpress.ready:
                 raise RuntimeError("WordPress credentials are required before sending Telegram messages")
 
-            source_replacements = self.create_source_pages(
-                item,
-                existing_wp_link=wp_link,
-                initial_source_html=source_page_html,
-                initial_page_links=page_links,
-            )
+            source_replacements: dict[str, str] = {}
+            if self.config.create_source_pages:
+                source_replacements = self.create_source_pages(
+                    item,
+                    existing_wp_link=wp_link,
+                    initial_source_html=source_page_html,
+                    initial_page_links=page_links,
+                )
             if source_replacements:
                 item.text = apply_link_replacements_text(item.text, source_replacements)
                 item.html_content = apply_link_replacements_html(item.html_content, source_replacements, item.source_url)
-                wp_link = wp_link or next(iter(source_replacements.values()))
-                if wp_link:
-                    self.state.set_wp_link(item.guid, wp_link)
 
             if not wp_link:
                 wp_content = build_wordpress_content(item, self.ai, important_links)
-                wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
+                require_uploaded_image = bool(wordpress_image_url_for_item(item))
+                wp_link = self.wordpress.publish(
+                    item.title,
+                    wp_content,
+                    item.source_url or self.config.feed_url,
+                    require_uploaded_image=require_uploaded_image,
+                )
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
             if not wp_link:
