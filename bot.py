@@ -220,6 +220,7 @@ class Config:
     groq_timeout: int = 20
     flood_max_retries: int = 6
     item_delay_seconds: int = 3
+    skip_wordpress: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -270,6 +271,7 @@ class Config:
             groq_timeout=parse_int(os.environ.get("GROQ_TIMEOUT"), 20, minimum=5),
             flood_max_retries=parse_int(os.environ.get("FLOOD_MAX_RETRIES"), 6, minimum=1),
             item_delay_seconds=parse_int(os.environ.get("ITEM_DELAY_SECONDS"), 3, minimum=0),
+            skip_wordpress=parse_bool(os.environ.get("SKIP_WORDPRESS"), False),
         )
 
     @property
@@ -1103,7 +1105,7 @@ class WordPressClient:
         headers = self.api_headers(kwargs.pop("headers", {}))
         timeout = kwargs.pop("timeout", self.config.wp_timeout)
         if isinstance(timeout, (int, float)):
-            request_timeout: Any = (min(12, int(timeout)), int(timeout))
+            request_timeout: Any = (min(25, int(timeout)), int(timeout))
         else:
             request_timeout = timeout
         attempts = self.config.wp_max_retries
@@ -1551,6 +1553,38 @@ def extract_enclosure(node: Any, feed_url: str) -> tuple[str, str]:
     return "", ""
 
 
+def enrich_item_media(item: FeedItem) -> None:
+    if item.enclosure_url:
+        return
+    markup = item.html_content or ""
+    if markup:
+        soup = make_soup(markup, "html.parser")
+        for img in soup.find_all("img"):
+            source_url = image_candidate_from_tag(img, item.source_url or "")
+            if looks_like_real_image(source_url):
+                item.enclosure_url = source_url
+                item.enclosure_type = normalize_mime(mimetypes.guess_type(source_url)[0] or "image/jpeg")
+                return
+    for url in extract_urls("\n".join([item.text or "", markup])):
+        if looks_like_real_image(url):
+            item.enclosure_url = url
+            item.enclosure_type = normalize_mime(mimetypes.guess_type(url)[0] or "image/jpeg")
+            return
+
+
+def send_post_link_followup(telegram: "TelegramClient", channels: list[str], wp_link: str, delay: int = 0) -> None:
+    if not wp_link or not urlparse(wp_link).path.strip("/"):
+        return
+    message = f"Full Post: {wp_link}"
+    for index, channel in enumerate(channels):
+        if index and delay > 0:
+            time.sleep(delay)
+        try:
+            telegram.send_text(channel, message)
+        except Exception as exc:
+            LOGGER.warning("Could not send WordPress follow-up to %s: %s", channel, exc)
+
+
 def first_non_spam_url(text: str) -> str:
     for url in extract_urls(text):
         if not is_spam_url(url):
@@ -1720,6 +1754,14 @@ class MirrorBot:
         return response.text
 
     def run(self) -> None:
+        LOGGER.info("Source RSS feed: %s", self.config.feed_url)
+        LOGGER.info("Destination channel(s): %s", ", ".join(self.config.dest_channels))
+        LOGGER.info(
+            "WordPress target: %s | post_type=%s | skip_wordpress=%s",
+            self.config.wp_url or "(disabled)",
+            self.config.wp_post_type,
+            self.config.skip_wordpress,
+        )
         xml_data = self.fetch_feed()
         items = parse_feed(xml_data, self.config.feed_url)
         LOGGER.info("Parsed %s feed item(s).", len(items))
@@ -1728,7 +1770,7 @@ class MirrorBot:
             LOGGER.info("No pending items to process.")
             return
         LOGGER.info("Processing %s item(s).", len(selected))
-        for item in reversed(selected):
+        for item in selected:
             if self.time_budget_exceeded(reserve_seconds=45):
                 LOGGER.warning("Stopping before next item to stay inside MAX_RUN_SECONDS=%s.", self.config.max_run_seconds)
                 break
@@ -1779,6 +1821,8 @@ class MirrorBot:
                 LOGGER.warning("Item skipped after cleanup: %s", item.title[:80])
                 return
 
+            enrich_item_media(item)
+
             should_fetch_source = self.config.max_source_pages_per_item > 0 or self.config.fetch_source_for_links
             if should_fetch_source and item.source_url:
                 source_page_html, page_links = self.fetch_source_context(item.source_url)
@@ -1813,23 +1857,29 @@ class MirrorBot:
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
-            if self.wordpress.ready and not wp_link:
+            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
+            if self.config.dry_run:
+                LOGGER.info("[DRY_RUN] Would dispatch Telegram for: %s", item.title[:80])
+            else:
+                self.dispatch_telegram(item, "", important_links, caption_source_url)
+
+            if self.wordpress.ready and not self.config.skip_wordpress and not wp_link:
                 try:
                     wp_content = build_wordpress_content(item, self.ai, important_links)
                     wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
                 except Exception as exc:
-                    LOGGER.warning("WordPress publish failed; continuing with Telegram-only dispatch: %s", exc)
+                    LOGGER.warning("WordPress publish failed after Telegram dispatch: %s", exc)
                     wp_link = ""
                 if not wp_link and not self.config.dry_run:
                     LOGGER.warning("WordPress publish did not return a full post link.")
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
-
-            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
-            if self.config.dry_run:
-                LOGGER.info("[DRY_RUN] Would dispatch Telegram for: %s", item.title[:80])
-            else:
-                self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
+                    send_post_link_followup(
+                        self.telegram,
+                        self.config.dest_channels,
+                        wp_link,
+                        delay=self.config.item_delay_seconds,
+                    )
 
             if self.config.dry_run:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])
