@@ -33,6 +33,7 @@ IMAGE_BRAND_ADDRESS_LATIN = os.environ.get(
     "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara",
 ).strip()
 ACADEMY_WEBSITE = os.environ.get("ACADEMY_WEBSITE", "https://positronacademy.in").strip()
+PAGE_BUILD_MODE = os.environ.get("PAGE_BUILD_MODE", "mirror").strip().lower()
 SOURCE_PAGE_HOSTS = tuple(
     part.strip() for part in os.environ.get("SOURCE_PAGE_HOSTS", "indianaukrihelp.com").split(",") if part.strip()
 )
@@ -417,6 +418,112 @@ def _html_paragraph(text: str) -> str:
     return bot.linkify_text(escaped)
 
 
+def _remove_mirror_noise(soup_or_tag) -> None:
+    for element in list(soup_or_tag(["script", "style", "noscript", "iframe", "form", "button", "svg"])):
+        element.decompose()
+    for element in list(soup_or_tag.find_all(["nav", "footer", "header", "aside"])):
+        element.decompose()
+    _remove_existing_important_link_sections(soup_or_tag)
+    for selector in (
+        ".sharedaddy",
+        ".jp-relatedposts",
+        ".related-posts",
+        ".post-navigation",
+        ".comments-area",
+        "#comments",
+        ".breadcrumb",
+        ".ast-breadcrumbs-wrapper",
+    ):
+        for element in list(soup_or_tag.select(selector)):
+            element.decompose()
+
+
+def _mirror_has_substance(html_markup: str) -> bool:
+    text = bot.strip_tags(html_markup or "")
+    return len(text) >= 120
+
+
+def _insert_clean_h1(soup, title: str) -> Any:
+    display_title = title
+    for old_h1 in list(soup.find_all("h1")):
+        old_h1.decompose()
+    h1 = soup.new_tag("h1")
+    h1.string = display_title
+    target = soup.find("article") or soup.find("main") or soup.find("body") or soup
+    target.insert(0, h1)
+    return target
+
+
+def _build_mirror_html(
+    title: str,
+    source_url: str,
+    primary_text: str,
+    source_html: str,
+    ai: bot.AIRewriter,
+    image_url: str = "",
+    image_alt: str = "",
+) -> str:
+    display_title = clean_title(title, source_url, primary_text)
+    if _mirror_has_substance(source_html):
+        raw_html = source_html
+    elif _mirror_has_substance(primary_text):
+        raw_html = bot.text_to_html(primary_text)
+    else:
+        raw_html = bot.text_to_html(display_title)
+
+    cleaned = _original_sanitize_html_content(raw_html, source_url)
+    soup = bot.make_soup(cleaned, "html.parser")
+    _remove_mirror_noise(soup)
+    bot.normalize_links(soup, source_url)
+    target = _insert_clean_h1(soup, display_title)
+
+    if image_url and not _blocked_source_url(image_url):
+        has_image = bool(soup.find("img"))
+        if not has_image:
+            figure = soup.new_tag("figure")
+            img = soup.new_tag("img")
+            img["src"] = image_url
+            img["alt"] = image_alt or display_title
+            img["style"] = "max-width:100%; height:auto;"
+            img["loading"] = "lazy"
+            img["decoding"] = "async"
+            figure.append(img)
+            target.insert(1, figure)
+
+    main_html = remove_disallowed_source_links(str(soup), source_url)
+    return main_html + "\n" + source_block(source_url)
+
+
+def _build_page_html(
+    title: str,
+    source_url: str,
+    primary_text: str,
+    source_html: str,
+    ai: bot.AIRewriter,
+    image_url: str = "",
+    image_alt: str = "",
+) -> str:
+    if PAGE_BUILD_MODE == "digest":
+        return _build_digest_html(
+            title,
+            source_url,
+            primary_text,
+            source_html,
+            ai,
+            image_url=image_url,
+            image_alt=image_alt,
+        )
+    return _build_mirror_html(
+        title,
+        source_url,
+        primary_text,
+        source_html,
+        ai,
+        image_url=image_url,
+        image_alt=image_alt,
+    )
+
+
 def _build_pdf_block(pdf_links: list[bot.LinkInfo]) -> str:
     if not pdf_links:
         return ""
@@ -481,7 +588,7 @@ def _build_digest_html(
 def build_wordpress_content(item: bot.FeedItem, ai: bot.AIRewriter, important_links: list[bot.LinkInfo]) -> str:
     raw_text = bot.normalize_whitespace("\n".join([item.text or "", bot.html_to_text_with_links(item.html_content or "", item.source_url)]))
     image_url = item.enclosure_url if bot.normalize_mime(item.enclosure_type).startswith("image/") else ""
-    return _build_digest_html(
+    return _build_page_html(
         item.title,
         item.source_url or "",
         raw_text,
@@ -500,7 +607,7 @@ def build_source_page_content(
     ai: bot.AIRewriter,
     important_links: list[bot.LinkInfo],
 ) -> str:
-    return _build_digest_html(title, source_url, fallback_text, source_html, ai)
+    return _build_page_html(title, source_url, fallback_text, source_html, ai)
 
 
 def build_caption(

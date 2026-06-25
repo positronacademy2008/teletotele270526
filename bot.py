@@ -1840,10 +1840,14 @@ class MirrorBot:
         if "t.me/" in lower_url or "telegram.me/" in lower_url:
             return "", []
         try:
-            response = self.session.get(
+            response = request_with_flood_retry(
+                self.session,
+                "GET",
                 source_url,
-                headers=default_headers(self.config.feed_url),
-                timeout=20,
+                max_attempts=self.config.flood_max_retries,
+                label=f"source_fetch:{source_url[:80]}",
+                headers=default_headers(source_url),
+                timeout=30,
                 verify=self.config.verify_ssl,
             )
             if response.status_code != 200:

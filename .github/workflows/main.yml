@@ -74,6 +74,8 @@ jobs:
           ACADEMY_WEBSITE: "https://positronacademy.in"
           IMAGE_BRAND_ADDRESS_LATIN: "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
           WP_SKIP_EXISTING: "true"
+          WP_UPLOAD_MEDIA: "true"
+          PAGE_BUILD_MODE: "mirror"
           SOURCE_PAGE_HOSTS: indianaukrihelp.com
           SKIP_MESSAGE_PHRASES: "शिक्षा विभाग समाचार"
           WEB_FOLLOW_LINE: "📢 Follow TELEGRAM WHATSAPP https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q | TELEGRAM https://t.me/RAJASTHAN_TODAY"
