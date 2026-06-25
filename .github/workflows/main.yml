@@ -70,6 +70,7 @@ jobs:
           WP_SKIP_EXISTING: "true"
           WP_UPLOAD_MEDIA: "false"
           MAX_SOURCE_PAGES_PER_ITEM: "0"
+          FETCH_SOURCE_FOR_LINKS: "true"
           PAGE_BUILD_MODE: digest
           SOURCE_PAGE_HOSTS: indianaukrihelp.com
           SKIP_MESSAGE_PHRASES: "शिक्षा विभाग समाचार"

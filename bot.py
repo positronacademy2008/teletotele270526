@@ -139,12 +139,13 @@ IMPORTANT_LABEL_HINTS = (
     "download",
 )
 
-AI_SYSTEM_PROMPT = """Rewrite in clear Hinglish.
-Keep all facts, dates, numbers, fees, eligibility, deadlines, official names, and links unchanged.
-Do not invent details.
-Do not remove official/source links.
-Make it suitable for an educational/news update channel.
-Return plain text for Telegram captions and clean HTML for WordPress content when requested."""
+AI_SYSTEM_PROMPT = """You write Indian government job, exam, result, and education updates for Positron Academy.
+Use clear Hinglish. RECREATE the update in fresh wording — never copy source sentences verbatim.
+Keep every fact, date, number, fee, eligibility rule, deadline, exam name, and organisation name accurate.
+Do not invent or guess missing details.
+Never mention indianaukrihelp.com or other news-aggregator/blog links.
+Official government URLs and PDF links are added separately — do not paste random third-party links.
+Return plain text for Telegram or clean HTML for WordPress as requested."""
 
 
 def setup_logging() -> None:
@@ -212,6 +213,7 @@ class Config:
     wp_remove_blocked_images: bool = True
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
     max_source_pages_per_item: int = 0
+    fetch_source_for_links: bool = True
     protected_image_hosts: tuple[str, ...] = DEFAULT_PROTECTED_IMAGE_HOSTS
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
@@ -258,6 +260,7 @@ class Config:
             wp_remove_blocked_images=parse_bool(os.environ.get("WP_REMOVE_BLOCKED_IMAGES"), True),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
             max_source_pages_per_item=parse_int(os.environ.get("MAX_SOURCE_PAGES_PER_ITEM"), 0, minimum=0),
+            fetch_source_for_links=parse_bool(os.environ.get("FETCH_SOURCE_FOR_LINKS"), True),
             protected_image_hosts=parse_csv_tuple(
                 os.environ.get("PROTECTED_IMAGE_HOSTS"),
                 DEFAULT_PROTECTED_IMAGE_HOSTS,
@@ -1298,10 +1301,31 @@ class AIRewriter:
         return self.client is not None and not self.disabled_reason
 
     def rewrite_plain(self, source_text: str) -> str:
+        return self.recreate_plain("", source_text)
+
+    def recreate_plain(self, title: str, source_text: str) -> str:
+        heading = f"Title: {title}\n\n" if title else ""
         return self._rewrite(
             source_text,
-            "Return plain text for a Telegram caption/digest. Keep every URL visible.",
+            heading
+            + "Recreate this update as 4-6 fresh Hinglish bullet points (each starting with -). "
+            "Do not copy source wording. Keep facts, dates, numbers, and deadlines accurate. "
+            "Do not include any URLs in your answer.",
             is_html=False,
+            recreate=True,
+        )
+
+    def recreate_digest_html(self, title: str, source_text: str) -> str:
+        return self._rewrite(
+            source_text,
+            f"Title: {title}\n\n"
+            "Recreate this update as clean WordPress HTML with exactly these sections:\n"
+            "<h1>title</h1>\n"
+            '<section class="pa-summary"><h2>Quick Summary</h2><ul><li>3-5 recreated bullet points</li></ul></section>\n'
+            '<section class="pa-details"><h2>Key Details</h2><p>2-4 short recreated paragraphs with facts</p></section>\n'
+            "Do not copy source sentences. Do not include <a> links or indianaukrihelp references.",
+            is_html=True,
+            recreate=True,
         )
 
     def rewrite_html(self, source_html: str) -> str:
@@ -1311,7 +1335,14 @@ class AIRewriter:
             is_html=True,
         )
 
-    def _rewrite(self, source: str, instruction: str, is_html: bool) -> str:
+    def _rewrite(
+        self,
+        source: str,
+        instruction: str,
+        is_html: bool,
+        *,
+        recreate: bool = False,
+    ) -> str:
         if not self.enabled:
             return source
         try:
@@ -1321,12 +1352,12 @@ class AIRewriter:
                     {"role": "system", "content": AI_SYSTEM_PROMPT},
                     {"role": "user", "content": f"{instruction}\n\n{source[:8000]}"},
                 ],
-                temperature=0.25 if is_html else 0.4,
+                temperature=0.45 if recreate else (0.25 if is_html else 0.4),
                 timeout=float(self.config.groq_timeout),
             )
             result = response.choices[0].message.content or ""
             result = strip_markdown_fence(result)
-            if not fact_safety_check(source, result, is_html=is_html):
+            if not fact_safety_check(source, result, is_html=is_html, allow_missing_urls=recreate):
                 LOGGER.warning("AI output failed fact-safety checks; using cleaned original content.")
                 return source
             return result
@@ -1355,7 +1386,13 @@ def count_html_assets(markup: str) -> tuple[int, int]:
     return images, links
 
 
-def fact_safety_check(original: str, candidate: str, is_html: bool) -> bool:
+def fact_safety_check(
+    original: str,
+    candidate: str,
+    is_html: bool,
+    *,
+    allow_missing_urls: bool = False,
+) -> bool:
     if not candidate or not normalize_whitespace(strip_tags(candidate if is_html else candidate)):
         return False
 
@@ -1366,13 +1403,13 @@ def fact_safety_check(original: str, candidate: str, is_html: bool) -> bool:
 
     original_urls = set(extract_urls(original))
     candidate_urls = set(extract_urls(candidate))
-    if original_urls:
+    if original_urls and not allow_missing_urls:
         missing = original_urls - candidate_urls
         allowed_missing = max(1, len(original_urls) // 4)
         if len(missing) > allowed_missing:
             return False
 
-    if is_html:
+    if is_html and not allow_missing_urls:
         original_images, original_links = count_html_assets(original)
         new_images, new_links = count_html_assets(candidate)
         if new_images < original_images:
@@ -1742,7 +1779,8 @@ class MirrorBot:
                 LOGGER.warning("Item skipped after cleanup: %s", item.title[:80])
                 return
 
-            if self.config.max_source_pages_per_item > 0:
+            should_fetch_source = self.config.max_source_pages_per_item > 0 or self.config.fetch_source_for_links
+            if should_fetch_source and item.source_url:
                 source_page_html, page_links = self.fetch_source_context(item.source_url)
             else:
                 source_page_html, page_links = "", []
@@ -1775,23 +1813,23 @@ class MirrorBot:
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
-            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
-            if self.config.dry_run:
-                LOGGER.info("[DRY_RUN] Would dispatch Telegram for: %s", item.title[:80])
-            else:
-                self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
-
             if self.wordpress.ready and not wp_link:
                 try:
                     wp_content = build_wordpress_content(item, self.ai, important_links)
                     wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
                 except Exception as exc:
-                    LOGGER.warning("WordPress publish failed after Telegram dispatch: %s", exc)
+                    LOGGER.warning("WordPress publish failed; continuing with Telegram-only dispatch: %s", exc)
                     wp_link = ""
                 if not wp_link and not self.config.dry_run:
-                    LOGGER.warning("WordPress publish did not return a link.")
+                    LOGGER.warning("WordPress publish did not return a full post link.")
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
+
+            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
+            if self.config.dry_run:
+                LOGGER.info("[DRY_RUN] Would dispatch Telegram for: %s", item.title[:80])
+            else:
+                self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
 
             if self.config.dry_run:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])
@@ -1912,7 +1950,7 @@ class MirrorBot:
     ) -> None:
         ctype = normalize_mime(item.enclosure_type)
         clean_text = remove_spam_urls_from_text(item.text)
-        rewritten_text = self.ai.rewrite_plain(clean_text)
+        rewritten_text = self.ai.recreate_plain(item.title, clean_text)
         media_caption = build_caption(
             item.title,
             rewritten_text,

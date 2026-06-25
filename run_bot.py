@@ -42,6 +42,7 @@ _original_sanitize_html_content = bot.sanitize_html_content
 _original_publish = bot.WordPressClient.publish
 _original_upload_media_bytes = bot.WordPressClient.upload_media_bytes
 _original_send_image_item = bot.MirrorBot.send_image_item
+_original_dispatch_telegram = bot.MirrorBot.dispatch_telegram
 
 
 BOILERPLATE_CLASS_HINTS = (
@@ -275,7 +276,7 @@ def sanitize_html_content(markup: str, base_url: str = "") -> str:
 
 
 def important_links_block(links: list[bot.LinkInfo]) -> str:
-    return ""
+    return _build_official_links_block(_filter_official_links(links))
 
 
 def source_block(source_url: str) -> str:
@@ -396,6 +397,74 @@ def _source_text_relevant(title: str, source_url: str, source_text: str) -> bool
     hits = sum(1 for token in wanted if token in haystack)
     threshold = 4 if len(wanted) >= 7 else 3
     return hits >= threshold
+
+
+def _is_full_post_link(url: str) -> bool:
+    parsed = urlparse((url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    return bool(parsed.path.strip("/"))
+
+
+def _is_official_resource_link(url: str) -> bool:
+    if not url or _blocked_source_url(url) or bot.is_spam_url(url):
+        return False
+    lower = url.lower()
+    if any(host in lower for host in bot.SOCIAL_HOST_HINTS):
+        return False
+    if _is_pdf_url(url):
+        return True
+    return any(hint in lower for hint in bot.OFFICIAL_DOMAIN_HINTS)
+
+
+def _filter_official_links(links: list[bot.LinkInfo]) -> list[bot.LinkInfo]:
+    output: list[bot.LinkInfo] = []
+    seen: set[str] = set()
+    for link in links:
+        href = bot.safe_url(link.href)
+        if not href or not _is_official_resource_link(href) or _is_pdf_url(href):
+            continue
+        key = _canonical_url(href)
+        if key in seen:
+            continue
+        seen.add(key)
+        label = bot.normalize_whitespace(link.label) or urlparse(href).netloc
+        output.append(bot.LinkInfo(label=label[:100], href=href))
+        if len(output) >= 6:
+            break
+    return output
+
+
+def _collect_resource_links(
+    important_links: list[bot.LinkInfo],
+    *text_sources: tuple[str, str],
+) -> tuple[list[bot.LinkInfo], list[bot.LinkInfo]]:
+    official = _filter_official_links(important_links)
+    pdf_links = _extract_pdf_links(*text_sources)
+    seen_official = {_canonical_url(link.href) for link in official}
+    for pdf in pdf_links:
+        key = _canonical_url(pdf.href)
+        if key not in seen_official:
+            official.append(pdf)
+    pdf_only = [link for link in pdf_links if _is_pdf_url(link.href)]
+    return official, pdf_only
+
+
+def _build_official_links_block(links: list[bot.LinkInfo]) -> str:
+    official = [link for link in links if not _is_pdf_url(link.href)]
+    if not official:
+        return ""
+    items = []
+    for link in official:
+        href = html.escape(link.href, quote=True)
+        label = html.escape(link.label or urlparse(link.href).netloc)
+        items.append(f'<li><a href="{href}" target="_blank" rel="nofollow noopener">{label}</a></li>')
+    return (
+        '<section class="official-links">'
+        "<h2>Official Links</h2>"
+        f"<ul>{''.join(items)}</ul>"
+        "</section>"
+    )
 
 
 def _extract_pdf_links(*sources: tuple[str, str]) -> list[bot.LinkInfo]:
@@ -609,43 +678,26 @@ def _build_digest_html(
     else:
         combined_text = primary or source_text
 
-    points = bot.sentence_candidates(combined_text)
-    paragraphs = _paragraphs_from_text(combined_text, display_title)
-    pdf_links = _extract_pdf_links((source_html, source_url), (primary_text, source_url), (combined_text, source_url))
-
-    pieces: list[str] = [f"<h1>{html.escape(display_title)}</h1>"]
+    _, pdf_links = _collect_resource_links([], (source_html, source_url), (primary_text, source_url), (combined_text, source_url))
+    recreated = ai.recreate_digest_html(display_title, combined_text or display_title)
+    pieces: list[str] = [recreated]
     if image_url and not _blocked_source_url(image_url):
-        pieces.append(
+        pieces.insert(
+            0,
             "<figure>"
             f'<img src="{html.escape(image_url, quote=True)}" alt="{html.escape(image_alt or display_title, quote=True)}" '
             'style="max-width:100%; height:auto;" loading="lazy" decoding="async">'
-            "</figure>"
+            "</figure>",
         )
-
-    if points:
-        bullet_items = "".join(f"<li>{_html_paragraph(point)}</li>" for point in points[:5])
-        pieces.append(f'<section class="pa-summary"><h2>Quick Summary</h2><ul>{bullet_items}</ul></section>')
-
-    if paragraphs:
-        body = "".join(f"<p>{_html_paragraph(paragraph)}</p>" for paragraph in paragraphs)
-        pieces.append(f'<section class="pa-details"><h2>Key Details</h2>{body}</section>')
-    elif not points:
-        pieces.append(
-            '<section class="pa-details"><h2>Key Details</h2>'
-            "<p>Please verify the latest details from the official notice/source before taking action.</p>"
-            "</section>"
-        )
-
     pieces.append(_build_pdf_block(pdf_links))
     main_html = "\n".join(piece for piece in pieces if piece)
-    rewritten = ai.rewrite_html(main_html)
-    return remove_disallowed_source_links(rewritten, source_url) + "\n" + source_block(source_url)
+    return remove_disallowed_source_links(main_html, source_url) + "\n" + source_block(source_url)
 
 
 def build_wordpress_content(item: bot.FeedItem, ai: bot.AIRewriter, important_links: list[bot.LinkInfo]) -> str:
     raw_text = bot.normalize_whitespace("\n".join([item.text or "", bot.html_to_text_with_links(item.html_content or "", item.source_url)]))
     image_url = item.enclosure_url if bot.normalize_mime(item.enclosure_type).startswith("image/") else ""
-    return _build_page_html(
+    page_html = _build_page_html(
         item.title,
         item.source_url or "",
         raw_text,
@@ -654,6 +706,10 @@ def build_wordpress_content(item: bot.FeedItem, ai: bot.AIRewriter, important_li
         image_url=image_url,
         image_alt=item.title,
     )
+    official_block = important_links_block(important_links)
+    if official_block and "official-links" not in page_html:
+        page_html = page_html + "\n" + official_block
+    return page_html
 
 
 def build_source_page_content(
@@ -682,13 +738,11 @@ def build_caption(
     caption_source = content_text or fallback_text
     if "<" in caption_source and ">" in caption_source:
         caption_source = fallback_text or bot.html_to_text_with_links(caption_source, source_url)
-    clean_text = _clean_text_for_digest(bot.normalize_whitespace(caption_source), source_url)
-    points = bot.sentence_candidates(bot.URL_RE.sub("", clean_text))
-    section_names = {"quick summary", "key details", "pdf download", "follow & source"}
-    points = [point for point in points if point.strip().lower() not in section_names]
+    clean_text = bot.normalize_whitespace(bot.URL_RE.sub("", caption_source))
+    points = bot.sentence_candidates(clean_text)
     points = [point for point in points if re.sub(r"\W+", "", point.lower()) != title_key]
     if len(points) < 3:
-        for point in bot.sentence_candidates(fallback_text):
+        for point in bot.sentence_candidates(_clean_text_for_digest(fallback_text, source_url)):
             point_key = re.sub(r"\W+", "", point.lower())
             if point not in points and point_key != title_key:
                 points.append(point)
@@ -696,10 +750,27 @@ def build_caption(
                 break
     points = points[:5]
 
+    official_links, pdf_links = _collect_resource_links(
+        important_links,
+        (fallback_text, source_url),
+        (caption_source, source_url),
+    )
+
     fixed_tail: list[str] = []
-    website = (wp_link or ACADEMY_WEBSITE).strip()
-    if website:
-        fixed_tail.append(f"Website: {website}")
+    if _is_full_post_link(wp_link):
+        fixed_tail.append(f"Full Post: {wp_link}")
+    for link in official_links:
+        if _is_pdf_url(link.href):
+            continue
+        label = bot.normalize_whitespace(link.label) or urlparse(link.href).netloc
+        fixed_tail.append(f"Official: {label} — {link.href}")
+        if len([line for line in fixed_tail if line.startswith("Official:")]) >= 3:
+            break
+    for index, pdf in enumerate(pdf_links[:3], start=1):
+        label = bot.normalize_whitespace(pdf.label)
+        if not label or label.lower() == "pdf download":
+            label = f"PDF {index}"
+        fixed_tail.append(f"PDF: {label} — {pdf.href}")
     fixed_tail.append(IMAGE_BRAND_NAME)
     fixed_tail.append(f"Address: {IMAGE_BRAND_ADDRESS_LATIN}")
     fixed_tail.append(f"Contact: {IMAGE_BRAND_CONTACT}")
@@ -855,6 +926,49 @@ def send_image_item(self, item: bot.FeedItem, media_caption: str, fallback_text:
             self.telegram.send_text(channel, fallback_text)
 
 
+def dispatch_telegram(
+    self,
+    item: bot.FeedItem,
+    wp_link: str,
+    important_links: list[bot.LinkInfo],
+    caption_source_url: str,
+) -> None:
+    clean_text = bot.remove_spam_urls_from_text(item.text)
+    display_title = clean_title(item.title, item.source_url or "", clean_text)
+    rewritten_text = self.ai.recreate_plain(display_title, clean_text)
+    media_caption = build_caption(
+        item.title,
+        rewritten_text,
+        clean_text,
+        wp_link,
+        caption_source_url,
+        important_links,
+        self.config,
+        900,
+    )
+    text_caption = build_caption(
+        item.title,
+        rewritten_text,
+        clean_text,
+        wp_link,
+        caption_source_url,
+        important_links,
+        self.config,
+        3900,
+    )
+    ctype = bot.normalize_mime(item.enclosure_type)
+    if item.enclosure_url and ctype == "application/pdf":
+        self.send_pdf_item(item, media_caption, text_caption)
+        return
+    if item.enclosure_url and (ctype.startswith("image/") or bot.looks_like_real_image(item.enclosure_url)):
+        self.send_image_item(item, media_caption, text_caption)
+        return
+    for index, channel in enumerate(self.config.dest_channels):
+        if index and self.config.item_delay_seconds > 0:
+            time.sleep(self.config.item_delay_seconds)
+        self.telegram.send_text(channel, text_caption)
+
+
 bot.sanitize_html_content = sanitize_html_content
 bot.important_links_block = important_links_block
 bot.source_block = source_block
@@ -864,6 +978,7 @@ bot.build_caption = build_caption
 bot.WordPressClient.publish = publish
 bot.WordPressClient.upload_media_bytes = upload_media_bytes
 bot.MirrorBot.send_image_item = send_image_item
+bot.MirrorBot.dispatch_telegram = dispatch_telegram
 
 if __name__ == "__main__":
     bot.main()
