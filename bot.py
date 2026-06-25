@@ -1628,12 +1628,16 @@ class MirrorBot:
             row = self.state.get(item.guid)
             wp_link = row["wp_link"] if row and row["wp_link"] else ""
 
-            source_replacements = self.create_source_pages(
-                item,
-                existing_wp_link=wp_link,
-                initial_source_html=source_page_html,
-                initial_page_links=page_links,
-            )
+            try:
+                source_replacements = self.create_source_pages(
+                    item,
+                    existing_wp_link=wp_link,
+                    initial_source_html=source_page_html,
+                    initial_page_links=page_links,
+                )
+            except Exception as exc:
+                source_replacements = {}
+                LOGGER.warning("WordPress source-page creation failed; continuing without replacement links: %s", exc)
             if source_replacements:
                 item.text = apply_link_replacements_text(item.text, source_replacements)
                 item.html_content = apply_link_replacements_html(item.html_content, source_replacements, item.source_url)
@@ -1642,10 +1646,14 @@ class MirrorBot:
                     self.state.set_wp_link(item.guid, wp_link)
 
             if self.wordpress.ready and not wp_link:
-                wp_content = build_wordpress_content(item, self.ai, important_links)
-                wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
+                try:
+                    wp_content = build_wordpress_content(item, self.ai, important_links)
+                    wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
+                except Exception as exc:
+                    LOGGER.warning("WordPress publish failed; continuing with Telegram-only dispatch: %s", exc)
+                    wp_link = ""
                 if not wp_link and not self.config.dry_run:
-                    raise RuntimeError("WordPress publish did not return a link")
+                    LOGGER.warning("WordPress publish did not return a link; continuing without a website link.")
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
