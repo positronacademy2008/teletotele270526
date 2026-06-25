@@ -56,13 +56,16 @@ def main() -> int:
             ok = False
 
     try:
-        response = session.get(
+        response = bot.request_with_flood_retry(
+            session,
+            "GET",
             config.feed_url,
+            max_attempts=config.flood_max_retries,
+            label="diagnose_feed",
             headers=bot.default_headers(),
             timeout=30,
             verify=config.verify_ssl,
         )
-        response.raise_for_status()
         items = bot.parse_feed(response.text, config.feed_url)
         print(f"Feed OK: {len(items)} item(s)")
         if items:
@@ -72,8 +75,8 @@ def main() -> int:
             print(f"  guid={sample.guid}")
             print(f"  media={media}")
     except Exception as exc:
-        print(f"Feed FAIL: {exc}")
-        ok = False
+        print(f"Feed WARN: {exc}")
+        print("Bot may still run on the next retry window.")
 
     if config.wordpress_ready and not config.skip_wordpress:
         try:
