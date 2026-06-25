@@ -2,6 +2,12 @@ name: Telegram Auto Post
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_previous_run:
+        description: "Manual test ke liye — pehle wala bot state (bot_state.sqlite3) delete karke fresh run karein"
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "2/5 * * * *"
 
@@ -30,6 +36,16 @@ jobs:
 
       - name: Install deps
         run: pip install -r requirements.txt
+
+      - name: Clean previous bot state
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run }}
+        run: |
+          if [ -f bot_state.sqlite3 ]; then
+            rm -f bot_state.sqlite3
+            echo "Removed bot_state.sqlite3 — fresh manual test run will start."
+          else
+            echo "No bot_state.sqlite3 found; already clean."
+          fi
 
       - name: Run bot
         env:
