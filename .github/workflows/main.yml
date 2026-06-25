@@ -37,6 +37,12 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Install branding fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-ui-core fonts-dejavu-core
+          fc-cache -f -v || true
+
       - name: Clean previous bot state
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run }}
         run: |
@@ -63,8 +69,10 @@ jobs:
           FLOOD_MAX_RETRIES: "8"
           MAX_RETRIES: "3"
           WP_POST_TYPE: pages
-          WP_TIMEOUT: "25"
-          WP_MAX_RETRIES: "2"
+          WP_TIMEOUT: "45"
+          WP_MAX_RETRIES: "3"
+          ACADEMY_WEBSITE: "https://positronacademy.in"
+          IMAGE_BRAND_ADDRESS_LATIN: "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
           WP_SKIP_EXISTING: "true"
           SOURCE_PAGE_HOSTS: indianaukrihelp.com
           SKIP_MESSAGE_PHRASES: "शिक्षा विभाग समाचार"

@@ -618,6 +618,8 @@ def linkify_text(escaped_text: str) -> str:
 
 
 def normalize_links(soup_or_tag: Any, base_url: str = "") -> None:
+    if soup_or_tag is None or not hasattr(soup_or_tag, "find_all"):
+        return
     for link in soup_or_tag.find_all("a"):
         href = safe_url(link.get("href"), base_url)
         if not href or is_spam_url(href):
@@ -1068,6 +1070,10 @@ class WordPressClient:
     def request_json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         headers = self.api_headers(kwargs.pop("headers", {}))
         timeout = kwargs.pop("timeout", self.config.wp_timeout)
+        if isinstance(timeout, (int, float)):
+            request_timeout: Any = (min(12, int(timeout)), int(timeout))
+        else:
+            request_timeout = timeout
         attempts = self.config.wp_max_retries
         last_error = ""
         for attempt in range(1, attempts + 1):
@@ -1077,7 +1083,7 @@ class WordPressClient:
                     url,
                     auth=(self.config.wp_user, self.config.wp_pass),
                     headers=headers,
-                    timeout=timeout,
+                    timeout=request_timeout,
                     verify=self.config.verify_ssl,
                     **kwargs,
                 )
@@ -1829,6 +1835,9 @@ class MirrorBot:
 
     def fetch_source_context(self, source_url: str) -> tuple[str, list[LinkInfo]]:
         if not source_url or is_spam_url(source_url):
+            return "", []
+        lower_url = source_url.lower()
+        if "t.me/" in lower_url or "telegram.me/" in lower_url:
             return "", []
         try:
             response = self.session.get(

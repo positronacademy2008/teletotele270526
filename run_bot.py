@@ -28,6 +28,11 @@ IMAGE_BRAND_ADDRESS = os.environ.get(
     "चौधरी के पास हॉस्पिटल, पांसल चौराहा,भीलवाड़ा",
 ).strip()
 IMAGE_BRAND_CONTACT = os.environ.get("IMAGE_BRAND_CONTACT", "8104894648").strip()
+IMAGE_BRAND_ADDRESS_LATIN = os.environ.get(
+    "IMAGE_BRAND_ADDRESS_LATIN",
+    "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara",
+).strip()
+ACADEMY_WEBSITE = os.environ.get("ACADEMY_WEBSITE", "https://positronacademy.in").strip()
 SOURCE_PAGE_HOSTS = tuple(
     part.strip() for part in os.environ.get("SOURCE_PAGE_HOSTS", "indianaukrihelp.com").split(",") if part.strip()
 )
@@ -528,8 +533,12 @@ def build_caption(
     points = points[:5]
 
     fixed_tail: list[str] = []
-    if wp_link:
-        fixed_tail.append(f"Website: {wp_link}")
+    website = (wp_link or ACADEMY_WEBSITE).strip()
+    if website:
+        fixed_tail.append(f"Website: {website}")
+    fixed_tail.append(IMAGE_BRAND_NAME)
+    fixed_tail.append(f"Address: {IMAGE_BRAND_ADDRESS_LATIN}")
+    fixed_tail.append(f"Contact: {IMAGE_BRAND_CONTACT}")
 
     for point_count in range(min(5, len(points)), -1, -1):
         lines = [display_title[:180]]
@@ -573,7 +582,9 @@ def find_brand_font(size: int) -> Any:
     candidates = (
         "C:/Windows/Fonts/Nirmala.ttf",
         "C:/Windows/Fonts/mangal.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     )
@@ -600,19 +611,20 @@ def brand_image_bytes(image_bytes: bytes, content_type: str, config: BrandConfig
         with Image.open(io.BytesIO(image_bytes)) as img:
             img = img.convert("RGBA")
             width, height = img.size
-            if width < 220 or height < 120:
+            if width < 160 or height < 100:
+                bot.LOGGER.warning("Image too small for branding (%sx%s); skipping watermark", width, height)
                 return image_bytes, content_type
 
             overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            bar_height = max(58, min(height // 4, 130))
-            draw.rectangle((0, height - bar_height, width, height), fill=(10, 20, 35, 190))
+            bar_height = max(64, min(height // 3, 150))
+            draw.rectangle((0, height - bar_height, width, height), fill=(10, 20, 35, 210))
 
-            title_font = find_brand_font(max(16, min(width // 22, 34)))
-            body_font = find_brand_font(max(12, min(width // 34, 22)))
+            title_font = find_brand_font(max(18, min(width // 20, 36)))
+            body_font = find_brand_font(max(14, min(width // 30, 24)))
             lines = [
                 config.image_brand_name or IMAGE_BRAND_NAME,
-                config.image_brand_address or IMAGE_BRAND_ADDRESS,
+                IMAGE_BRAND_ADDRESS_LATIN,
                 f"Contact: {config.image_brand_contact or IMAGE_BRAND_CONTACT}",
             ]
             y = height - bar_height + 8
@@ -633,6 +645,7 @@ def brand_image_bytes(image_bytes: bytes, content_type: str, config: BrandConfig
                 branded.convert("RGB").save(out, format="WEBP", quality=88, method=6)
                 return out.getvalue(), "image/webp"
             branded.convert("RGB").save(out, format="JPEG", quality=88, optimize=True)
+            bot.LOGGER.info("Applied POSITRON image branding watermark.")
             return out.getvalue(), "image/jpeg"
     except Exception as exc:
         bot.LOGGER.warning("Image branding failed; using original image. Error: %s", exc)
