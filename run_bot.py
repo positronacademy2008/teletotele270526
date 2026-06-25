@@ -5,6 +5,7 @@ import io
 import mimetypes
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -667,7 +668,9 @@ def send_image_item(self, item: bot.FeedItem, media_caption: str, fallback_text:
             self.telegram.send_text(channel, fallback_text)
         return
 
-    for channel in self.config.dest_channels:
+    for index, channel in enumerate(self.config.dest_channels):
+        if index and self.config.item_delay_seconds > 0:
+            time.sleep(self.config.item_delay_seconds)
         try:
             self.telegram.send_photo(channel, image_bytes, media_caption, content_type)
         except Exception as exc:

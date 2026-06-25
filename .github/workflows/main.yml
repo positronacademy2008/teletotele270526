@@ -58,7 +58,9 @@ jobs:
           WP_PASS: ${{ secrets.WP_PASS }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
           DB_FILE: bot_state.sqlite3
-          MAX_ITEMS_PER_RUN: "5"
+          MAX_ITEMS_PER_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '1' || '5' }}
+          ITEM_DELAY_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '15' || '3' }}
+          FLOOD_MAX_RETRIES: "8"
           MAX_RETRIES: "3"
           WP_POST_TYPE: pages
           WP_TIMEOUT: "25"

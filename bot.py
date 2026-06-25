@@ -216,6 +216,8 @@ class Config:
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
     groq_timeout: int = 20
+    flood_max_retries: int = 6
+    item_delay_seconds: int = 3
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -263,6 +265,8 @@ class Config:
             skip_message_phrases=parse_csv_tuple(os.environ.get("SKIP_MESSAGE_PHRASES"), HARD_SKIP_PHRASES),
             groq_model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant",
             groq_timeout=parse_int(os.environ.get("GROQ_TIMEOUT"), 20, minimum=5),
+            flood_max_retries=parse_int(os.environ.get("FLOOD_MAX_RETRIES"), 6, minimum=1),
+            item_delay_seconds=parse_int(os.environ.get("ITEM_DELAY_SECONDS"), 3, minimum=0),
         )
 
     @property
@@ -311,6 +315,72 @@ def build_session(config: Config) -> requests.Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
+FLOOD_WAIT_RE = re.compile(r"FLOOD_WAIT_(\d+)", re.I)
+
+
+def flood_wait_seconds(response: requests.Response | None = None, error_text: str = "") -> int:
+    chunks: list[str] = []
+    if response is not None:
+        chunks.append(response.text or "")
+        if response.reason:
+            chunks.append(response.reason)
+    if error_text:
+        chunks.append(error_text)
+    for chunk in chunks:
+        match = FLOOD_WAIT_RE.search(chunk)
+        if match:
+            return max(1, int(match.group(1)))
+    return 0
+
+
+def request_with_flood_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    max_attempts: int = 6,
+    label: str = "request",
+    **kwargs: Any,
+) -> requests.Response:
+    last_response: requests.Response | None = None
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = session.request(method, url, **kwargs)
+            last_response = response
+            if response.status_code == 429:
+                wait = flood_wait_seconds(response)
+                if wait:
+                    LOGGER.warning(
+                        "Rate limited (%ss) on %s; sleeping and retrying %s/%s",
+                        wait,
+                        label,
+                        attempt,
+                        max_attempts,
+                    )
+                    time.sleep(wait + 1)
+                    continue
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as exc:
+            last_error = str(exc)
+            wait = flood_wait_seconds(last_response, last_error)
+            if wait and attempt < max_attempts:
+                LOGGER.warning(
+                    "HTTP error with flood wait %ss on %s; retrying %s/%s",
+                    wait,
+                    label,
+                    attempt,
+                    max_attempts,
+                )
+                time.sleep(wait + 1)
+                continue
+            raise
+    if last_response is not None:
+        last_response.raise_for_status()
+    raise RuntimeError(last_error or f"Request failed after {max_attempts} attempts: {label}")
 
 
 def default_headers(referer: str = "") -> dict[str, str]:
@@ -906,12 +976,15 @@ class TelegramClient:
             LOGGER.info("[DRY_RUN] Would send text to %s: %s", chat_id, text[:200])
             return
         LOGGER.info("Sending Telegram text to %s", chat_id)
-        response = self.session.post(
+        request_with_flood_retry(
+            self.session,
+            "POST",
             self._api_url("sendMessage"),
+            max_attempts=self.config.flood_max_retries,
+            label=f"sendMessage:{chat_id}",
             json={"chat_id": chat_id, "text": text, "disable_web_page_preview": disable_preview},
             timeout=20,
         )
-        response.raise_for_status()
 
     def send_photo(self, chat_id: str, photo_bytes: bytes, caption: str, content_type: str) -> None:
         content_type = normalize_mime(content_type)
@@ -925,8 +998,16 @@ class TelegramClient:
         ext = mimetypes.guess_extension(content_type) or ".jpg"
         files = {"photo": (f"image{ext}", photo_bytes, content_type)}
         data = {"chat_id": chat_id, "caption": caption}
-        response = self.session.post(self._api_url("sendPhoto"), data=data, files=files, timeout=60)
-        response.raise_for_status()
+        request_with_flood_retry(
+            self.session,
+            "POST",
+            self._api_url("sendPhoto"),
+            max_attempts=self.config.flood_max_retries,
+            label=f"sendPhoto:{chat_id}",
+            data=data,
+            files=files,
+            timeout=60,
+        )
 
     def send_document(self, chat_id: str, document_bytes: bytes, filename: str, caption: str) -> None:
         caption = trim_preserving_urls(caption, 900)
@@ -936,8 +1017,16 @@ class TelegramClient:
         LOGGER.info("Sending Telegram document to %s", chat_id)
         files = {"document": (filename, document_bytes, "application/pdf")}
         data = {"chat_id": chat_id, "caption": caption}
-        response = self.session.post(self._api_url("sendDocument"), data=data, files=files, timeout=75)
-        response.raise_for_status()
+        request_with_flood_retry(
+            self.session,
+            "POST",
+            self._api_url("sendDocument"),
+            max_attempts=self.config.flood_max_retries,
+            label=f"sendDocument:{chat_id}",
+            data=data,
+            files=files,
+            timeout=75,
+        )
 
 
 class WordPressClient:
@@ -1546,13 +1635,16 @@ class MirrorBot:
 
     def fetch_feed(self) -> str:
         LOGGER.info("Fetching feed: %s", self.config.feed_url)
-        response = self.session.get(
+        response = request_with_flood_retry(
+            self.session,
+            "GET",
             self.config.feed_url,
+            max_attempts=self.config.flood_max_retries,
+            label="feed_fetch",
             headers=default_headers(),
             timeout=30,
             verify=self.config.verify_ssl,
         )
-        response.raise_for_status()
         return response.text
 
     def run(self) -> None:
@@ -1569,8 +1661,8 @@ class MirrorBot:
                 LOGGER.warning("Stopping before next item to stay inside MAX_RUN_SECONDS=%s.", self.config.max_run_seconds)
                 break
             self.process_one(item)
-            if not self.time_budget_exceeded(reserve_seconds=2):
-                time.sleep(2)
+            if not self.time_budget_exceeded(reserve_seconds=2) and self.config.item_delay_seconds > 0:
+                time.sleep(self.config.item_delay_seconds)
 
     def time_budget_exceeded(self, reserve_seconds: int = 0) -> bool:
         if self.config.max_run_seconds <= 0:
@@ -1801,7 +1893,9 @@ class MirrorBot:
             self.send_image_item(item, media_caption, text_caption)
             return
 
-        for channel in self.config.dest_channels:
+        for index, channel in enumerate(self.config.dest_channels):
+            if index and self.config.item_delay_seconds > 0:
+                time.sleep(self.config.item_delay_seconds)
             self.telegram.send_text(channel, text_caption)
 
     def send_pdf_item(self, item: FeedItem, media_caption: str, fallback_text: str) -> None:
@@ -1854,7 +1948,9 @@ class MirrorBot:
                 self.telegram.send_text(channel, fallback_text)
             return
 
-        for channel in self.config.dest_channels:
+        for index, channel in enumerate(self.config.dest_channels):
+            if index and self.config.item_delay_seconds > 0:
+                time.sleep(self.config.item_delay_seconds)
             try:
                 self.telegram.send_photo(channel, response.content, media_caption, content_type)
             except Exception as exc:
