@@ -45,7 +45,7 @@ jobs:
           WP_URL: https://positronacademy.in
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
-          SKIP_WORDPRESS: "false"
+          SKIP_WORDPRESS: "true"
         run: python diagnose.py
 
       - name: Clean previous bot state
@@ -66,7 +66,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           WP_URL: https://positronacademy.in
           WP_REFERER: https://positronacademy.in/wp-admin/
-          SKIP_WORDPRESS: "false"
+          SKIP_WORDPRESS: "true"
           MAX_RUN_SECONDS: "360"
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}

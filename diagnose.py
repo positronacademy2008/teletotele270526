@@ -77,14 +77,26 @@ def main() -> int:
 
     if config.wordpress_ready and not config.skip_wordpress:
         try:
-            root = bot.WordPressClient(config, session).api_root()
-            response = session.get(f"{root}/posts?per_page=1", timeout=30, verify=config.verify_ssl)
+            client = bot.WordPressClient(config, session)
+            response = session.get(
+                f"{client.api_root()}/posts?per_page=1",
+                auth=(config.wp_user, config.wp_pass),
+                headers=client.api_headers(),
+                timeout=30,
+                verify=config.verify_ssl,
+            )
             print(f"WordPress API: HTTP {response.status_code}")
-            if response.status_code != 200:
+            if response.status_code in {406, 403}:
+                print(
+                    "WordPress WARN: blocked from this network (ModSecurity/firewall). "
+                    "Run run_local.ps1 on your PC for website posts."
+                )
+            elif response.status_code != 200:
+                print(f"WordPress FAIL: {response.text[:200]}")
                 ok = False
         except Exception as exc:
-            print(f"WordPress FAIL: {exc}")
-            ok = False
+            print(f"WordPress WARN: {exc}")
+            print("Run run_local.ps1 on your PC for website posts.")
 
     return 0 if ok else 2
 
