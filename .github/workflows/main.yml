@@ -37,12 +37,6 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Install branding fonts
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-ui-core fonts-dejavu-core
-          fc-cache -f -v || true
-
       - name: Clean previous bot state
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run }}
         run: |
@@ -79,7 +73,7 @@ jobs:
           SOURCE_PAGE_HOSTS: indianaukrihelp.com
           SKIP_MESSAGE_PHRASES: "शिक्षा विभाग समाचार"
           WEB_FOLLOW_LINE: "📢 Follow TELEGRAM WHATSAPP https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q | TELEGRAM https://t.me/RAJASTHAN_TODAY"
-          BRAND_IMAGES: "true"
+          BRAND_IMAGES: "false"
           IMAGE_BRAND_NAME: POSITRON ACADEMY
           IMAGE_BRAND_ADDRESS: "चौधरी के पास हॉस्पिटल, पांसल चौराहा,भीलवाड़ा"
           IMAGE_BRAND_CONTACT: "8104894648"

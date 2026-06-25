@@ -21,7 +21,7 @@ except Exception:
 
 
 WEB_FOLLOW_LINE = os.environ.get("WEB_FOLLOW_LINE", "").strip()
-BRAND_IMAGES = os.environ.get("BRAND_IMAGES", "true").strip().lower() in {"1", "true", "yes", "on"}
+BRAND_IMAGES = os.environ.get("BRAND_IMAGES", "false").strip().lower() in {"1", "true", "yes", "on"}
 IMAGE_BRAND_NAME = os.environ.get("IMAGE_BRAND_NAME", "POSITRON ACADEMY").strip()
 IMAGE_BRAND_ADDRESS = os.environ.get(
     "IMAGE_BRAND_ADDRESS",
@@ -191,13 +191,7 @@ def _remove_layout_noise(soup_or_tag) -> None:
             element.decompose()
 
 
-def remove_disallowed_source_links(markup: str, base_url: str = "") -> str:
-    if not markup:
-        return markup
-    soup = bot.make_soup(markup, "html.parser")
-    _remove_layout_noise(soup)
-    _remove_existing_important_link_sections(soup)
-
+def _strip_blocked_source_urls_from_text(soup, base_url: str = "") -> None:
     for link in list(soup.find_all("a", href=True)):
         href = bot.safe_url(link.get("href"), base_url)
         if not href or not _blocked_source_url(href):
@@ -221,40 +215,77 @@ def remove_disallowed_source_links(markup: str, base_url: str = "") -> str:
         replaced = bot.URL_RE.sub(replace, original)
         if replaced != original:
             text_node.replace_with(replaced)
+
+
+def _element_starts_with_blocked_source_link(element) -> bool:
+    for child in element.children:
+        if getattr(child, "name", None) == "br":
+            continue
+        if isinstance(child, str):
+            if not bot.normalize_whitespace(child):
+                continue
+            return False
+        if getattr(child, "name", None) == "a" and child.get("href"):
+            href = bot.safe_url(child.get("href"), "")
+            return _blocked_source_url(href)
+        break
+    return False
+
+
+def _remove_source_link_start_blocks(soup_or_tag) -> None:
+    for element in list(soup_or_tag.find_all(["p", "li", "div", "section"])):
+        if _element_starts_with_blocked_source_link(element):
+            element.decompose()
+            continue
+        text = bot.normalize_whitespace(element.get_text(" ", strip=True))
+        if not text:
+            continue
+        urls = bot.extract_urls(text)
+        if urls and all(_blocked_source_url(url) for url in urls):
+            element.decompose()
+
+
+def _strip_mirror_source_links(markup: str, base_url: str = "") -> str:
+    if not markup:
+        return markup
+    soup = bot.make_soup(markup, "html.parser")
+    for element in list(soup(["script", "style", "noscript", "iframe", "form", "button", "svg"])):
+        element.decompose()
+    _remove_existing_important_link_sections(soup)
+    _remove_source_link_start_blocks(soup)
+    _strip_blocked_source_urls_from_text(soup, base_url)
+    return str(soup)
+
+
+def remove_disallowed_source_links(markup: str, base_url: str = "") -> str:
+    if not markup:
+        return markup
+    soup = bot.make_soup(markup, "html.parser")
+    _remove_layout_noise(soup)
+    _remove_existing_important_link_sections(soup)
+    _strip_blocked_source_urls_from_text(soup, base_url)
     return str(soup)
 
 
 def sanitize_html_content(markup: str, base_url: str = "") -> str:
-    return remove_disallowed_source_links(_original_sanitize_html_content(markup, base_url), base_url)
+    cleaned = _original_sanitize_html_content(markup, base_url)
+    if PAGE_BUILD_MODE == "mirror":
+        return _strip_mirror_source_links(cleaned, base_url)
+    return remove_disallowed_source_links(cleaned, base_url)
 
 
 def important_links_block(links: list[bot.LinkInfo]) -> str:
     return ""
 
 
-def _source_host_label(source_url: str) -> str:
-    host = (urlparse(source_url).netloc or source_url).strip()
-    return host.removeprefix("www.") or "source page"
-
-
 def source_block(source_url: str) -> str:
-    lines: list[str] = []
-    if WEB_FOLLOW_LINE:
-        lines.append(bot.linkify_text(html.escape(WEB_FOLLOW_LINE)))
-    if source_url:
-        host = _source_host_label(source_url)
-        if _is_pdf_url(source_url) or not _blocked_source_url(source_url):
-            href = html.escape(source_url, quote=True)
-            lines.append(f'<a href="{href}" target="_blank" rel="nofollow noopener">{html.escape(host)}</a>')
-        else:
-            lines.append(f"Source attribution: {html.escape(host)}")
-    if not lines:
+    if not WEB_FOLLOW_LINE:
         return ""
     return (
         '<section class="source-link">'
-        "<h2>Follow & Source</h2>"
-        + "".join(f"<p>{line}</p>" for line in lines)
-        + "</section>"
+        "<h2>Follow</h2>"
+        f"<p>{bot.linkify_text(html.escape(WEB_FOLLOW_LINE))}</p>"
+        "</section>"
     )
 
 
@@ -443,6 +474,28 @@ def _mirror_has_substance(html_markup: str) -> bool:
     return len(text) >= 120
 
 
+def _title_match_key(value: str) -> str:
+    return re.sub(r"\W+", "", bot.normalize_whitespace(value).lower())
+
+
+def _remove_duplicate_title_blocks(soup, title: str) -> None:
+    title_key = _title_match_key(title)
+    if not title_key:
+        return
+    for heading in list(soup.find_all(re.compile(r"^h[1-6]$"))):
+        if heading.name == "h1":
+            continue
+        if _title_match_key(heading.get_text(" ", strip=True)) == title_key:
+            heading.decompose()
+    for tag in list(soup.find_all(["p", "div", "span", "strong"])):
+        text = bot.normalize_whitespace(tag.get_text(" ", strip=True))
+        if not text:
+            continue
+        text_key = _title_match_key(text)
+        if text_key == title_key or (len(title_key) >= 24 and text_key.startswith(title_key[:24])):
+            tag.decompose()
+
+
 def _insert_clean_h1(soup, title: str) -> Any:
     display_title = title
     for old_h1 in list(soup.find_all("h1")):
@@ -476,6 +529,9 @@ def _build_mirror_html(
     _remove_mirror_noise(soup)
     bot.normalize_links(soup, source_url)
     target = _insert_clean_h1(soup, display_title)
+    _remove_duplicate_title_blocks(soup, display_title)
+    _remove_source_link_start_blocks(soup)
+    _strip_blocked_source_urls_from_text(soup, source_url)
 
     if image_url and not _blocked_source_url(image_url):
         has_image = bool(soup.find("img"))
@@ -490,8 +546,9 @@ def _build_mirror_html(
             figure.append(img)
             target.insert(1, figure)
 
-    main_html = remove_disallowed_source_links(str(soup), source_url)
-    return main_html + "\n" + source_block(source_url)
+    main_html = str(soup)
+    follow_block = source_block(source_url)
+    return main_html + ("\n" + follow_block if follow_block else "")
 
 
 def _build_page_html(
