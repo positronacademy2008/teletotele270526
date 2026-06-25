@@ -33,7 +33,7 @@ IMAGE_BRAND_ADDRESS_LATIN = os.environ.get(
     "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara",
 ).strip()
 ACADEMY_WEBSITE = os.environ.get("ACADEMY_WEBSITE", "https://positronacademy.in").strip()
-PAGE_BUILD_MODE = os.environ.get("PAGE_BUILD_MODE", "mirror").strip().lower()
+PAGE_BUILD_MODE = os.environ.get("PAGE_BUILD_MODE", "digest").strip().lower()
 SOURCE_PAGE_HOSTS = tuple(
     part.strip() for part in os.environ.get("SOURCE_PAGE_HOSTS", "indianaukrihelp.com").split(",") if part.strip()
 )

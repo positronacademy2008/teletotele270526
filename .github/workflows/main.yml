@@ -62,14 +62,15 @@ jobs:
           ITEM_DELAY_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '15' || '3' }}
           FLOOD_MAX_RETRIES: "8"
           MAX_RETRIES: "3"
-          WP_POST_TYPE: pages
+          WP_POST_TYPE: posts
           WP_TIMEOUT: "45"
           WP_MAX_RETRIES: "3"
           ACADEMY_WEBSITE: "https://positronacademy.in"
           IMAGE_BRAND_ADDRESS_LATIN: "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
           WP_SKIP_EXISTING: "true"
-          WP_UPLOAD_MEDIA: "true"
-          PAGE_BUILD_MODE: "mirror"
+          WP_UPLOAD_MEDIA: "false"
+          MAX_SOURCE_PAGES_PER_ITEM: "0"
+          PAGE_BUILD_MODE: digest
           SOURCE_PAGE_HOSTS: indianaukrihelp.com
           SKIP_MESSAGE_PHRASES: "शिक्षा विभाग समाचार"
           WEB_FOLLOW_LINE: "📢 Follow TELEGRAM WHATSAPP https://whatsapp.com/channel/0029VaZYv1G1noz4mprmxQ0q | TELEGRAM https://t.me/RAJASTHAN_TODAY"

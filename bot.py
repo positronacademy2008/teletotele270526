@@ -204,14 +204,14 @@ class Config:
     dry_run: bool = False
     follow_line_tg: str = ""
     follow_line_wa: str = ""
-    wp_post_type: str = "pages"
+    wp_post_type: str = "posts"
     wp_timeout: int = 25
     wp_max_retries: int = 2
     wp_referer: str = ""
     wp_upload_media: bool = False
     wp_remove_blocked_images: bool = True
     source_page_hosts: tuple[str, ...] = DEFAULT_SOURCE_PAGE_HOSTS
-    max_source_pages_per_item: int = 1
+    max_source_pages_per_item: int = 0
     protected_image_hosts: tuple[str, ...] = DEFAULT_PROTECTED_IMAGE_HOSTS
     skip_message_phrases: tuple[str, ...] = HARD_SKIP_PHRASES
     groq_model: str = "llama-3.1-8b-instant"
@@ -225,7 +225,7 @@ class Config:
         if missing:
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-        post_type = os.environ.get("WP_POST_TYPE", "pages").strip().lower() or "pages"
+        post_type = os.environ.get("WP_POST_TYPE", "posts").strip().lower() or "posts"
         if post_type not in {"pages", "posts"}:
             raise RuntimeError("WP_POST_TYPE must be either 'pages' or 'posts'")
 
@@ -257,7 +257,7 @@ class Config:
             wp_upload_media=parse_bool(os.environ.get("WP_UPLOAD_MEDIA"), False),
             wp_remove_blocked_images=parse_bool(os.environ.get("WP_REMOVE_BLOCKED_IMAGES"), True),
             source_page_hosts=parse_csv_tuple(os.environ.get("SOURCE_PAGE_HOSTS"), DEFAULT_SOURCE_PAGE_HOSTS),
-            max_source_pages_per_item=parse_int(os.environ.get("MAX_SOURCE_PAGES_PER_ITEM"), 1, minimum=0),
+            max_source_pages_per_item=parse_int(os.environ.get("MAX_SOURCE_PAGES_PER_ITEM"), 0, minimum=0),
             protected_image_hosts=parse_csv_tuple(
                 os.environ.get("PROTECTED_IMAGE_HOSTS"),
                 DEFAULT_PROTECTED_IMAGE_HOSTS,
@@ -1713,7 +1713,10 @@ class MirrorBot:
                 LOGGER.warning("Item skipped after cleanup: %s", item.title[:80])
                 return
 
-            source_page_html, page_links = self.fetch_source_context(item.source_url)
+            if self.config.max_source_pages_per_item > 0:
+                source_page_html, page_links = self.fetch_source_context(item.source_url)
+            else:
+                source_page_html, page_links = "", []
             important_links = dedupe_links(
                 [
                     *extract_important_links(item.html_content or item.text, item.source_url),
