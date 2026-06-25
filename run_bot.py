@@ -1,20 +1,40 @@
 from __future__ import annotations
 
 import html
+import io
+import mimetypes
 import os
 import re
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 
 import bot
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
 
 WEB_FOLLOW_LINE = os.environ.get("WEB_FOLLOW_LINE", "").strip()
+BRAND_IMAGES = os.environ.get("BRAND_IMAGES", "true").strip().lower() in {"1", "true", "yes", "on"}
+IMAGE_BRAND_NAME = os.environ.get("IMAGE_BRAND_NAME", "POSITRON ACADEMY").strip()
+IMAGE_BRAND_ADDRESS = os.environ.get(
+    "IMAGE_BRAND_ADDRESS",
+    "चौधरी के पास हॉस्पिटल, पांसल चौराहा,भीलवाड़ा",
+).strip()
+IMAGE_BRAND_CONTACT = os.environ.get("IMAGE_BRAND_CONTACT", "8104894648").strip()
 SOURCE_PAGE_HOSTS = tuple(
     part.strip() for part in os.environ.get("SOURCE_PAGE_HOSTS", "indianaukrihelp.com").split(",") if part.strip()
 )
 
 _original_sanitize_html_content = bot.sanitize_html_content
 _original_publish = bot.WordPressClient.publish
+_original_upload_media_bytes = bot.WordPressClient.upload_media_bytes
+_original_send_image_item = bot.MirrorBot.send_image_item
 
 
 BOILERPLATE_CLASS_HINTS = (
@@ -529,6 +549,132 @@ def publish(self, title: str, content_html: str, base_url: str = "") -> str:
     return _original_publish(self, clean, content_html, base_url)
 
 
+@dataclass(frozen=True)
+class BrandConfig:
+    brand_images: bool
+    image_brand_name: str
+    image_brand_address: str
+    image_brand_contact: str
+
+
+def _brand_config() -> BrandConfig:
+    return BrandConfig(
+        brand_images=BRAND_IMAGES,
+        image_brand_name=IMAGE_BRAND_NAME,
+        image_brand_address=IMAGE_BRAND_ADDRESS,
+        image_brand_contact=IMAGE_BRAND_CONTACT,
+    )
+
+
+def find_brand_font(size: int) -> Any:
+    if ImageFont is None:
+        return None
+    candidates = (
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/mangal.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    )
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def brand_image_bytes(image_bytes: bytes, content_type: str, config: BrandConfig) -> tuple[bytes, str]:
+    content_type = bot.normalize_mime(content_type)
+    if not config.brand_images or Image is None or ImageDraw is None or ImageFont is None:
+        return image_bytes, content_type
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        return image_bytes, content_type
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGBA")
+            width, height = img.size
+            if width < 220 or height < 120:
+                return image_bytes, content_type
+
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            bar_height = max(58, min(height // 4, 130))
+            draw.rectangle((0, height - bar_height, width, height), fill=(10, 20, 35, 190))
+
+            title_font = find_brand_font(max(16, min(width // 22, 34)))
+            body_font = find_brand_font(max(12, min(width // 34, 22)))
+            lines = [
+                config.image_brand_name or IMAGE_BRAND_NAME,
+                config.image_brand_address or IMAGE_BRAND_ADDRESS,
+                f"Contact: {config.image_brand_contact or IMAGE_BRAND_CONTACT}",
+            ]
+            y = height - bar_height + 8
+            x = max(12, width // 35)
+            for index, line in enumerate(lines):
+                font = title_font if index == 0 else body_font
+                fill = (255, 255, 255, 245) if index == 0 else (235, 245, 255, 235)
+                draw.text((x, y), line, font=font, fill=fill)
+                bbox = draw.textbbox((x, y), line, font=font)
+                y += max(16, bbox[3] - bbox[1] + 4)
+
+            branded = Image.alpha_composite(img, overlay)
+            out = io.BytesIO()
+            if content_type == "image/png":
+                branded.save(out, format="PNG", optimize=True)
+                return out.getvalue(), "image/png"
+            if content_type == "image/webp":
+                branded.convert("RGB").save(out, format="WEBP", quality=88, method=6)
+                return out.getvalue(), "image/webp"
+            branded.convert("RGB").save(out, format="JPEG", quality=88, optimize=True)
+            return out.getvalue(), "image/jpeg"
+    except Exception as exc:
+        bot.LOGGER.warning("Image branding failed; using original image. Error: %s", exc)
+        return image_bytes, content_type
+
+
+def upload_media_bytes(self, media_bytes: bytes, source_url: str, content_type: str, alt_text: str = "") -> str:
+    branded_bytes, branded_type = brand_image_bytes(media_bytes, content_type, _brand_config())
+    return _original_upload_media_bytes(self, branded_bytes, source_url, branded_type, alt_text)
+
+
+def send_image_item(self, item: bot.FeedItem, media_caption: str, fallback_text: str) -> None:
+    try:
+        response = self.session.get(
+            item.enclosure_url,
+            headers=bot.default_headers(self.config.feed_url),
+            timeout=60,
+            verify=self.config.verify_ssl,
+        )
+        response.raise_for_status()
+        content_type = bot.normalize_mime(response.headers.get("Content-Type", "")) or bot.normalize_mime(
+            item.enclosure_type
+        )
+        if not content_type.startswith("image/"):
+            guessed = mimetypes.guess_type(item.enclosure_url)[0] or ""
+            if not guessed.startswith("image/"):
+                raise ValueError(f"Enclosure MIME is not an image: {content_type or 'unknown'}")
+            content_type = guessed
+        image_bytes, content_type = brand_image_bytes(response.content, content_type, _brand_config())
+    except Exception as exc:
+        bot.LOGGER.warning("Image download/branding failed; falling back to text message. Error: %s", exc)
+        for channel in self.config.dest_channels:
+            self.telegram.send_text(channel, fallback_text)
+        return
+
+    for channel in self.config.dest_channels:
+        try:
+            self.telegram.send_photo(channel, image_bytes, media_caption, content_type)
+        except Exception as exc:
+            bot.LOGGER.warning("Photo send failed for %s; falling back to text. Error: %s", channel, exc)
+            self.telegram.send_text(channel, fallback_text)
+
+
 bot.sanitize_html_content = sanitize_html_content
 bot.important_links_block = important_links_block
 bot.source_block = source_block
@@ -536,6 +682,8 @@ bot.build_wordpress_content = build_wordpress_content
 bot.build_source_page_content = build_source_page_content
 bot.build_caption = build_caption
 bot.WordPressClient.publish = publish
+bot.WordPressClient.upload_media_bytes = upload_media_bytes
+bot.MirrorBot.send_image_item = send_image_item
 
 if __name__ == "__main__":
     bot.main()
