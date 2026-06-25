@@ -383,6 +383,17 @@ def request_with_flood_retry(
     raise RuntimeError(last_error or f"Request failed after {max_attempts} attempts: {label}")
 
 
+def check_telegram_response(response: requests.Response, method: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Telegram {method} returned invalid JSON: {response.text[:300]}") from exc
+    if not payload.get("ok"):
+        description = payload.get("description") or payload
+        raise RuntimeError(f"Telegram {method} rejected: {description}")
+    return payload
+
+
 def default_headers(referer: str = "") -> dict[str, str]:
     headers = {
         "User-Agent": (
@@ -978,7 +989,7 @@ class TelegramClient:
             LOGGER.info("[DRY_RUN] Would send text to %s: %s", chat_id, text[:200])
             return
         LOGGER.info("Sending Telegram text to %s", chat_id)
-        request_with_flood_retry(
+        response = request_with_flood_retry(
             self.session,
             "POST",
             self._api_url("sendMessage"),
@@ -986,6 +997,12 @@ class TelegramClient:
             label=f"sendMessage:{chat_id}",
             json={"chat_id": chat_id, "text": text, "disable_web_page_preview": disable_preview},
             timeout=20,
+        )
+        payload = check_telegram_response(response, "sendMessage")
+        LOGGER.info(
+            "Telegram text delivered to %s (message_id=%s)",
+            chat_id,
+            payload.get("result", {}).get("message_id"),
         )
 
     def send_photo(self, chat_id: str, photo_bytes: bytes, caption: str, content_type: str) -> None:
@@ -1000,7 +1017,7 @@ class TelegramClient:
         ext = mimetypes.guess_extension(content_type) or ".jpg"
         files = {"photo": (f"image{ext}", photo_bytes, content_type)}
         data = {"chat_id": chat_id, "caption": caption}
-        request_with_flood_retry(
+        response = request_with_flood_retry(
             self.session,
             "POST",
             self._api_url("sendPhoto"),
@@ -1009,6 +1026,12 @@ class TelegramClient:
             data=data,
             files=files,
             timeout=60,
+        )
+        payload = check_telegram_response(response, "sendPhoto")
+        LOGGER.info(
+            "Telegram photo delivered to %s (message_id=%s)",
+            chat_id,
+            payload.get("result", {}).get("message_id"),
         )
 
     def send_document(self, chat_id: str, document_bytes: bytes, filename: str, caption: str) -> None:
@@ -1019,7 +1042,7 @@ class TelegramClient:
         LOGGER.info("Sending Telegram document to %s", chat_id)
         files = {"document": (filename, document_bytes, "application/pdf")}
         data = {"chat_id": chat_id, "caption": caption}
-        request_with_flood_retry(
+        response = request_with_flood_retry(
             self.session,
             "POST",
             self._api_url("sendDocument"),
@@ -1028,6 +1051,12 @@ class TelegramClient:
             data=data,
             files=files,
             timeout=75,
+        )
+        payload = check_telegram_response(response, "sendDocument")
+        LOGGER.info(
+            "Telegram document delivered to %s (message_id=%s)",
+            chat_id,
+            payload.get("result", {}).get("message_id"),
         )
 
 
@@ -1746,15 +1775,21 @@ class MirrorBot:
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
+            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
+            if self.config.dry_run:
+                LOGGER.info("[DRY_RUN] Would dispatch Telegram for: %s", item.title[:80])
+            else:
+                self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
+
             if self.wordpress.ready and not wp_link:
                 try:
                     wp_content = build_wordpress_content(item, self.ai, important_links)
                     wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
                 except Exception as exc:
-                    LOGGER.warning("WordPress publish failed; continuing with Telegram-only dispatch: %s", exc)
+                    LOGGER.warning("WordPress publish failed after Telegram dispatch: %s", exc)
                     wp_link = ""
                 if not wp_link and not self.config.dry_run:
-                    LOGGER.warning("WordPress publish did not return a link; continuing without a website link.")
+                    LOGGER.warning("WordPress publish did not return a link.")
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
@@ -1762,8 +1797,6 @@ class MirrorBot:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])
                 return
 
-            caption_source_url = self.caption_source_url(item.source_url, source_replacements)
-            self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
             self.state.mark_published(item.guid, wp_link)
             LOGGER.info("Published item: %s", item.title[:100])
         except Exception as exc:
