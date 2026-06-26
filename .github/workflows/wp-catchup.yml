@@ -1,0 +1,62 @@
+name: WordPress Catch-up
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: wordpress-catchup
+  cancel-in-progress: false
+
+jobs:
+  wp-catchup:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run WordPress catch-up
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          DEST_CHANNEL: ${{ secrets.DEST_CHANNEL }}
+          FEED_URL: https://tg.i-c-a.su/rss/ShikshaVibhag
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          WP_URL: https://positronacademy.in
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+          WP_REFERER: https://positronacademy.in/wp-admin/
+          SKIP_WORDPRESS: "false"
+          WP_CATCHUP_ONLY: "true"
+          WP_CATCHUP: "true"
+          WP_POST_TYPE: posts
+          PAGE_BUILD_MODE: digest
+          DB_FILE: bot_state.sqlite3
+          MAX_RUN_SECONDS: "360"
+        run: python wp_catchup.py
+
+      - name: Commit SQLite state
+        if: always()
+        shell: bash
+        run: |
+          if [ -f bot_state.sqlite3 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add bot_state.sqlite3
+            if git diff --cached --quiet; then
+              echo "bot_state.sqlite3 unchanged"
+            else
+              git commit -m "Update bot sqlite state after WP catch-up"
+              git push origin HEAD:main || true
+            fi
+          fi
