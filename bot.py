@@ -1584,6 +1584,70 @@ def enrich_item_media(item: FeedItem) -> None:
             return
 
 
+def fetch_telegram_embed_content(source_url: str, session: requests.Session) -> tuple[str, str, str, str]:
+    """Fetch text/html/image from a public t.me post embed page."""
+    if not source_url:
+        return "", "", "", ""
+    lower_url = source_url.lower()
+    if "t.me/" not in lower_url and "telegram.me/" not in lower_url:
+        return "", "", "", ""
+    embed_url = source_url.split("?")[0] + "?embed=1"
+    try:
+        response = request_with_flood_retry(
+            session,
+            "GET",
+            embed_url,
+            max_attempts=2,
+            label=f"telegram_embed:{source_url[:80]}",
+            headers=default_headers(embed_url),
+            timeout=20,
+            verify=True,
+        )
+        if response.status_code != 200 or not response.text:
+            return "", "", "", ""
+        soup = make_soup(response.text, "html.parser")
+        text_node = soup.select_one(".tgme_widget_message_text")
+        text = text_node.get_text("\n", strip=True) if text_node else ""
+        html_content = str(text_node) if text_node else ""
+        for img in soup.select(".tgme_widget_message_photo_wrap img, .tgme_widget_message_wrap img"):
+            img_url = safe_url(img.get("src", ""), source_url)
+            if looks_like_real_image(img_url):
+                img_type = normalize_mime(mimetypes.guess_type(img_url)[0] or "image/jpeg")
+                return text, html_content, img_url, img_type
+        return text, html_content, "", ""
+    except Exception as exc:
+        LOGGER.warning("Telegram embed fetch failed for %s: %s", source_url, exc)
+        return "", "", "", ""
+
+
+def feed_item_from_catchup_row(row: sqlite3.Row, session: requests.Session | None = None) -> FeedItem:
+    guid = row["guid"] or ""
+    title = (row["title"] or "").strip()
+    source_url = (row["source_url"] or guid).strip()
+    text = title
+    html_content = ""
+    enclosure_url = ""
+    enclosure_type = ""
+    if session:
+        embed_text, embed_html, img_url, img_type = fetch_telegram_embed_content(source_url, session)
+        if embed_text:
+            text = embed_text
+        if embed_html:
+            html_content = embed_html
+        if img_url:
+            enclosure_url = img_url
+            enclosure_type = img_type
+    return FeedItem(
+        guid=guid,
+        title=title or text[:200],
+        text=text,
+        html_content=html_content,
+        source_url=source_url,
+        enclosure_url=enclosure_url,
+        enclosure_type=enclosure_type,
+    )
+
+
 def send_post_link_followup(telegram: "TelegramClient", channels: list[str], wp_link: str, delay: int = 0) -> None:
     if not wp_link or not urlparse(wp_link).path.strip("/"):
         return
@@ -1839,7 +1903,7 @@ class MirrorBot:
             return
 
         by_guid = {item.guid: item for item in feed_items}
-        pending_rows = self.state.list_published_without_wp_link(limit=8)
+        pending_rows = self.state.list_published_without_wp_link(limit=12)
         if not pending_rows:
             return
 
@@ -1850,8 +1914,8 @@ class MirrorBot:
                 break
             item = by_guid.get(row["guid"])
             if not item:
-                LOGGER.warning("Catch-up skipped (not in feed window): %s", row["guid"])
-                continue
+                item = feed_item_from_catchup_row(row, self.session)
+                LOGGER.info("Catch-up using stored row (outside feed window): %s", row["guid"])
             item.text = remove_spam_urls_from_text(item.text)
             enrich_item_media(item)
             source_page_html, page_links = "", []
