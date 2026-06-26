@@ -6,10 +6,11 @@ import sys
 
 from env_loader import load_dotenv
 
-if not load_dotenv():
-    print("ERROR: .env file missing.")
-    print("Copy .env.example to .env and fill BOT_TOKEN, WP_USER, WP_PASS, GROQ_API_KEY from GitHub secrets.")
-    print("Or run:  gh workflow run \"WordPress Catch-up\" --repo positronacademy2008/teletotele270526")
+load_dotenv()
+if not os.environ.get("BOT_TOKEN"):
+    print("ERROR: BOT_TOKEN missing.")
+    print("Local PC: copy .env.example to .env and fill secrets from GitHub.")
+    print("GitHub: use the \"WordPress Catch-up\" workflow.")
     sys.exit(1)
 
 os.environ.setdefault("WP_CATCHUP_ONLY", "true")
