@@ -205,7 +205,7 @@ class Config:
     dry_run: bool = False
     follow_line_tg: str = ""
     follow_line_wa: str = ""
-    wp_post_type: str = "posts"
+    wp_post_type: str = "pages"
     wp_timeout: int = 25
     wp_max_retries: int = 2
     wp_referer: str = ""
@@ -228,7 +228,7 @@ class Config:
         if missing:
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-        post_type = os.environ.get("WP_POST_TYPE", "posts").strip().lower() or "posts"
+        post_type = os.environ.get("WP_POST_TYPE", "pages").strip().lower() or "pages"
         if post_type not in {"pages", "posts"}:
             raise RuntimeError("WP_POST_TYPE must be either 'pages' or 'posts'")
 

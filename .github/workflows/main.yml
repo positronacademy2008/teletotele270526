@@ -77,7 +77,7 @@ jobs:
           ITEM_DELAY_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '15' || '3' }}
           FLOOD_MAX_RETRIES: "8"
           MAX_RETRIES: "3"
-          WP_POST_TYPE: posts
+          WP_POST_TYPE: ${{ secrets.WP_POST_TYPE || 'pages' }}
           WP_TIMEOUT: "45"
           WP_MAX_RETRIES: "3"
           ACADEMY_WEBSITE: "https://positronacademy.in"

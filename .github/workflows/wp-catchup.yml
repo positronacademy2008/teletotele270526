@@ -39,7 +39,7 @@ jobs:
           SKIP_WORDPRESS: "false"
           WP_CATCHUP_ONLY: "true"
           WP_CATCHUP: "true"
-          WP_POST_TYPE: posts
+          WP_POST_TYPE: ${{ secrets.WP_POST_TYPE || 'pages' }}
           PAGE_BUILD_MODE: digest
           DB_FILE: bot_state.sqlite3
           MAX_RUN_SECONDS: "360"
