@@ -42,7 +42,9 @@ jobs:
           WP_POST_TYPE: ${{ secrets.WP_POST_TYPE || 'pages' }}
           PAGE_BUILD_MODE: digest
           DB_FILE: bot_state.sqlite3
-          MAX_RUN_SECONDS: "360"
+          MAX_RUN_SECONDS: "900"
+          WP_TIMEOUT: "40"
+          WP_MAX_RETRIES: "3"
         run: python wp_catchup.py
 
       - name: Commit SQLite state

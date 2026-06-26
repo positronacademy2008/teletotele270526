@@ -977,7 +977,7 @@ class StateStore:
             SELECT guid, title, source_url, wp_link
             FROM items
             WHERE status = 'published' AND COALESCE(wp_link, '') = ''
-            ORDER BY updated_at DESC
+            ORDER BY created_at DESC
             LIMIT ?
             """,
             (limit,),
