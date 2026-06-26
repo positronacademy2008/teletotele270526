@@ -971,6 +971,18 @@ class StateStore:
         )
         self.conn.commit()
 
+    def list_published_without_wp_link(self, limit: int = 10) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT guid, title, source_url, wp_link
+            FROM items
+            WHERE status = 'published' AND COALESCE(wp_link, '') = ''
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
 
 class TelegramClient:
     def __init__(self, config: Config, session: requests.Session) -> None:
@@ -1575,7 +1587,7 @@ def enrich_item_media(item: FeedItem) -> None:
 def send_post_link_followup(telegram: "TelegramClient", channels: list[str], wp_link: str, delay: int = 0) -> None:
     if not wp_link or not urlparse(wp_link).path.strip("/"):
         return
-    message = f"Full Post: {wp_link}"
+    message = f"📌 Full Post: {wp_link}"
     for index, channel in enumerate(channels):
         if index and delay > 0:
             time.sleep(delay)
@@ -1765,6 +1777,14 @@ class MirrorBot:
         xml_data = self.fetch_feed()
         items = parse_feed(xml_data, self.config.feed_url)
         LOGGER.info("Parsed %s feed item(s).", len(items))
+
+        if parse_bool(os.environ.get("WP_CATCHUP_ONLY"), False):
+            self.catchup_wordpress_links(items)
+            return
+
+        if not self.config.skip_wordpress:
+            self.catchup_wordpress_links(items)
+
         selected = self.select_items(items)
         if not selected:
             LOGGER.info("No pending items to process.")
@@ -1783,6 +1803,75 @@ class MirrorBot:
             return False
         elapsed = time.monotonic() - self.started_at
         return elapsed + reserve_seconds >= self.config.max_run_seconds
+
+    def publish_wordpress_for_item(
+        self,
+        item: FeedItem,
+        important_links: list[LinkInfo] | None = None,
+        source_page_html: str = "",
+        page_links: list[LinkInfo] | None = None,
+    ) -> str:
+        if not self.wordpress.ready or self.config.skip_wordpress:
+            return ""
+        if important_links is None:
+            important_links = dedupe_links(
+                [
+                    *extract_important_links(item.html_content or item.text, item.source_url),
+                    *extract_important_links(source_page_html, item.source_url),
+                    *(page_links or []),
+                ],
+                limit=24,
+            )
+        try:
+            wp_content = build_wordpress_content(item, self.ai, important_links)
+            wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
+            if wp_link:
+                self.state.set_wp_link(item.guid, wp_link)
+            return wp_link or ""
+        except Exception as exc:
+            LOGGER.warning("WordPress publish failed for %s: %s", item.title[:80], exc)
+            return ""
+
+    def catchup_wordpress_links(self, feed_items: list[FeedItem]) -> None:
+        if self.config.skip_wordpress or not self.wordpress.ready:
+            return
+        if not parse_bool(os.environ.get("WP_CATCHUP"), True):
+            return
+
+        by_guid = {item.guid: item for item in feed_items}
+        pending_rows = self.state.list_published_without_wp_link(limit=8)
+        if not pending_rows:
+            return
+
+        LOGGER.info("WordPress catch-up: %s published item(s) missing post links.", len(pending_rows))
+        for row in pending_rows:
+            if self.time_budget_exceeded(reserve_seconds=60):
+                LOGGER.warning("Stopping WordPress catch-up to stay inside MAX_RUN_SECONDS.")
+                break
+            item = by_guid.get(row["guid"])
+            if not item:
+                LOGGER.warning("Catch-up skipped (not in feed window): %s", row["guid"])
+                continue
+            item.text = remove_spam_urls_from_text(item.text)
+            enrich_item_media(item)
+            source_page_html, page_links = "", []
+            if self.config.fetch_source_for_links and item.source_url:
+                source_page_html, page_links = self.fetch_source_context(item.source_url)
+            wp_link = self.publish_wordpress_for_item(
+                item,
+                source_page_html=source_page_html,
+                page_links=page_links,
+            )
+            if wp_link:
+                LOGGER.info("Catch-up published WordPress post: %s", wp_link)
+                send_post_link_followup(
+                    self.telegram,
+                    self.config.dest_channels,
+                    wp_link,
+                    delay=self.config.item_delay_seconds,
+                )
+            elif not self.config.dry_run:
+                LOGGER.warning("Catch-up could not create WordPress post for %s", row["guid"])
 
     def select_items(self, items: list[FeedItem]) -> list[FeedItem]:
         selected: list[FeedItem] = []
@@ -1857,29 +1946,21 @@ class MirrorBot:
                 if wp_link:
                     self.state.set_wp_link(item.guid, wp_link)
 
+            if self.wordpress.ready and not self.config.skip_wordpress and not wp_link:
+                wp_link = self.publish_wordpress_for_item(
+                    item,
+                    important_links=important_links,
+                    source_page_html=source_page_html,
+                    page_links=page_links,
+                )
+                if not wp_link and not self.config.dry_run:
+                    LOGGER.warning("WordPress publish did not return a full post link.")
+
             caption_source_url = self.caption_source_url(item.source_url, source_replacements)
             if self.config.dry_run:
                 LOGGER.info("[DRY_RUN] Would dispatch Telegram for: %s", item.title[:80])
             else:
-                self.dispatch_telegram(item, "", important_links, caption_source_url)
-
-            if self.wordpress.ready and not self.config.skip_wordpress and not wp_link:
-                try:
-                    wp_content = build_wordpress_content(item, self.ai, important_links)
-                    wp_link = self.wordpress.publish(item.title, wp_content, item.source_url or self.config.feed_url)
-                except Exception as exc:
-                    LOGGER.warning("WordPress publish failed after Telegram dispatch: %s", exc)
-                    wp_link = ""
-                if not wp_link and not self.config.dry_run:
-                    LOGGER.warning("WordPress publish did not return a full post link.")
-                if wp_link:
-                    self.state.set_wp_link(item.guid, wp_link)
-                    send_post_link_followup(
-                        self.telegram,
-                        self.config.dest_channels,
-                        wp_link,
-                        delay=self.config.item_delay_seconds,
-                    )
+                self.dispatch_telegram(item, wp_link, important_links, caption_source_url)
 
             if self.config.dry_run:
                 LOGGER.info("[DRY_RUN] Processed item without changing published/skipped state: %s", item.title[:80])

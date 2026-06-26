@@ -17,10 +17,12 @@ $env:FEED_URL = if ($env:FEED_URL) { $env:FEED_URL } else { "https://tg.i-c-a.su
 $env:DEST_CHANNEL = if ($env:DEST_CHANNEL) { $env:DEST_CHANNEL } else { "@RAJASTHAN_TODAY" }
 $env:WP_URL = if ($env:WP_URL) { $env:WP_URL } else { "https://positronacademy.in" }
 $env:SKIP_WORDPRESS = "false"
+$env:WP_CATCHUP = "true"
 $env:WP_POST_TYPE = "posts"
 $env:PAGE_BUILD_MODE = "digest"
 
 python diagnose.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+python wp_catchup.py
 python run_bot.py

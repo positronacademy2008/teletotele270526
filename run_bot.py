@@ -758,7 +758,7 @@ def build_caption(
 
     fixed_tail: list[str] = []
     if _is_full_post_link(wp_link):
-        fixed_tail.append(f"Full Post: {wp_link}")
+        fixed_tail.insert(0, f"📌 Full Post: {wp_link}")
     for link in official_links:
         if _is_pdf_url(link.href):
             continue
