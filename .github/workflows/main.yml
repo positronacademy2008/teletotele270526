@@ -46,7 +46,7 @@ jobs:
           WP_URL: https://positronacademy.in
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
-          SKIP_WORDPRESS: "true"
+          SKIP_WORDPRESS: "false"
         run: python diagnose.py
 
       - name: Clean previous bot state
@@ -67,7 +67,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           WP_URL: https://positronacademy.in
           WP_REFERER: https://positronacademy.in/wp-admin/
-          SKIP_WORDPRESS: "true"
+          SKIP_WORDPRESS: "false"
           MAX_RUN_SECONDS: "360"
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
@@ -84,7 +84,7 @@ jobs:
           IMAGE_BRAND_ADDRESS_LATIN: "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
           WP_SKIP_EXISTING: "true"
           WP_UPLOAD_MEDIA: "false"
-          MAX_SOURCE_PAGES_PER_ITEM: "0"
+          MAX_SOURCE_PAGES_PER_ITEM: "1"
           FETCH_SOURCE_FOR_LINKS: "true"
           PAGE_BUILD_MODE: digest
           SOURCE_PAGE_HOSTS: indianaukrihelp.com
