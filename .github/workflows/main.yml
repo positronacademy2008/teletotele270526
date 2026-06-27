@@ -81,7 +81,7 @@ jobs:
           WP_TIMEOUT: "45"
           WP_MAX_RETRIES: "3"
           ACADEMY_WEBSITE: "https://positronacademy.in"
-          IMAGE_BRAND_ADDRESS_LATIN: "Chaudhary Hospital ke paas, Pansal Chauraha, Bhilwara"
+          IMAGE_BRAND_ADDRESS_LATIN: "चौधरी के पास हॉस्पिटल, पांसल चौराहा,भीलवाड़ा"
           WP_SKIP_EXISTING: "true"
           WP_UPLOAD_MEDIA: "false"
           MAX_SOURCE_PAGES_PER_ITEM: "1"
