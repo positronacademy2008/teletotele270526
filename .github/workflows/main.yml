@@ -68,13 +68,13 @@ jobs:
           WP_URL: https://positronacademy.in
           WP_REFERER: https://positronacademy.in/wp-admin/
           SKIP_WORDPRESS: "false"
-          MAX_RUN_SECONDS: "360"
+          MAX_RUN_SECONDS: "900"
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
           DB_FILE: bot_state.sqlite3
-          MAX_ITEMS_PER_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '1' || '5' }}
-          ITEM_DELAY_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '15' || '3' }}
+          MAX_ITEMS_PER_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '10' || '5' }}
+          ITEM_DELAY_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_previous_run && '5' || '3' }}
           FLOOD_MAX_RETRIES: "8"
           MAX_RETRIES: "3"
           WP_POST_TYPE: ${{ secrets.WP_POST_TYPE || 'pages' }}
