@@ -42,7 +42,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           DEST_CHANNEL: ${{ secrets.DEST_CHANNEL }}
-          FEED_URL: https://tg.i-c-a.su/rss/ShikshaVibhag
+          FEED_URL: https://tg.i-c-a.su/rss/ShikshaNewsRajasthan
           WP_URL: https://positronacademy.in
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
@@ -63,7 +63,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           DEST_CHANNEL: ${{ secrets.DEST_CHANNEL }}
-          FEED_URL: https://tg.i-c-a.su/rss/ShikshaVibhag
+          FEED_URL: https://tg.i-c-a.su/rss/ShikshaNewsRajasthan
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           WP_URL: https://positronacademy.in
           WP_REFERER: https://positronacademy.in/wp-admin/

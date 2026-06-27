@@ -987,6 +987,49 @@ def send_image_item(self, item: bot.FeedItem, media_caption: str, fallback_text:
             self.telegram.send_text(channel, fallback_text)
 
 
+def _looks_like_direct_image_url(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(bot.clean_url(url))
+    path = parsed.path.lower()
+    if "/preview/" in path or "thumb" in path:
+        return False
+    return path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+
+
+def _set_media_from_url(item: bot.FeedItem, url: str) -> bool:
+    clean = bot.safe_url(url, item.source_url or "")
+    if not clean or bot.is_spam_url(clean):
+        return False
+    if _is_pdf_url(clean):
+        item.enclosure_url = clean
+        item.enclosure_type = "application/pdf"
+        return True
+    if _looks_like_direct_image_url(clean):
+        item.enclosure_url = clean
+        item.enclosure_type = bot.normalize_mime(mimetypes.guess_type(clean)[0] or "image/jpeg")
+        return True
+    return False
+
+
+def enrich_item_media(item: bot.FeedItem) -> None:
+    if item.enclosure_url:
+        return
+    markup = item.html_content or ""
+    if markup:
+        soup = bot.make_soup(markup, "html.parser")
+        for link in soup.find_all("a", href=True):
+            if _set_media_from_url(item, link.get("href", "")):
+                return
+        for img in soup.find_all("img"):
+            source_url = bot.image_candidate_from_tag(img, item.source_url or "")
+            if _set_media_from_url(item, source_url):
+                return
+    for url in bot.extract_urls("\n".join([item.text or "", markup])):
+        if _set_media_from_url(item, url):
+            return
+
+
 def dispatch_telegram(
     self,
     item: bot.FeedItem,
@@ -1025,7 +1068,7 @@ def dispatch_telegram(
     if item.enclosure_url and ctype == "application/pdf":
         self.send_pdf_item(item, media_caption, text_caption)
         return
-    if item.enclosure_url and (ctype.startswith("image/") or bot.looks_like_real_image(item.enclosure_url)):
+    if item.enclosure_url and (ctype.startswith("image/") or _looks_like_direct_image_url(item.enclosure_url)):
         self.send_image_item(item, media_caption, text_caption)
         return
     for index, channel in enumerate(self.config.dest_channels):
@@ -1042,6 +1085,7 @@ bot.build_source_page_content = build_source_page_content
 bot.build_caption = build_caption
 bot.WordPressClient.publish = publish
 bot.WordPressClient.upload_media_bytes = upload_media_bytes
+bot.enrich_item_media = enrich_item_media
 bot.MirrorBot.send_pdf_item = send_pdf_item
 bot.MirrorBot.send_image_item = send_image_item
 bot.MirrorBot.dispatch_telegram = dispatch_telegram
